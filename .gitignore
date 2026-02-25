@@ -21,3 +21,7 @@ Thumbs.db
 
 # Environment variables
 .env
+
+# Test scripts
+test_db.py
+test_cli.py

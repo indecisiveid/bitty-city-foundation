@@ -26,6 +26,10 @@ class SelectBuild(BaseModel):
     type: str  # "house" | "apartment" | "skyscraper"
 
 
+class FillCity(BaseModel):
+    count: Optional[int] = None  # how many tiles to fill; None = all empty
+
+
 # --- Nested Models ---
 
 class CurrentBuild(BaseModel):

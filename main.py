@@ -1,4 +1,5 @@
 import json
+import random
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -6,8 +7,11 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 import database as db
-from models import CreateGroup, JoinGroup, CompleteGoal, SelectBuild, GroupResponse
-from game_logic import needs_day_processing, get_processing_date, process_end_of_day, BUILDING_DAYS
+from models import CreateGroup, JoinGroup, CompleteGoal, SelectBuild, FillCity, GroupResponse
+from game_logic import (
+    needs_day_processing, get_processing_date, process_end_of_day, BUILDING_DAYS,
+    _find_occupied_tiles, _find_empty_tiles,
+)
 
 load_dotenv()
 
@@ -167,6 +171,72 @@ async def select_build(group_id: str, body: SelectBuild):
         "days_completed": 0,
     }
     row = await db.update_group(group_id, current_build=new_build)
+    return db.row_to_response(row)
+
+
+# --- Demo Endpoints ---
+
+@app.post("/demo/{group_id}/asteroid", response_model=GroupResponse)
+async def demo_asteroid(group_id: str):
+    row = await db.get_group_by_id(group_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    city_map = row["city_map"]
+    if isinstance(city_map, str):
+        city_map = json.loads(city_map)
+
+    # Check if there are any buildings to destroy
+    occupied = _find_occupied_tiles(city_map)
+    if not occupied:
+        raise HTTPException(status_code=400, detail="No buildings on the map to destroy")
+
+    current_build = row["current_build"]
+    if isinstance(current_build, str):
+        current_build = json.loads(current_build)
+
+    # If no active build, inject a dummy so the asteroid branch fires
+    if current_build is None:
+        current_build = {"type": "house", "days_required": 1, "days_completed": 0}
+
+    updates = process_end_of_day(
+        group_members=list(row["group_members"]),
+        completions_today=[],  # empty = failed day = asteroid
+        current_build=current_build,
+        city_map=city_map,
+        streak=row["streak"],
+    )
+
+    row = await db.update_group(group_id, **updates)
+    return db.row_to_response(row)
+
+
+@app.post("/demo/{group_id}/fill_city", response_model=GroupResponse)
+async def demo_fill_city(group_id: str, body: FillCity = FillCity()):
+    row = await db.get_group_by_id(group_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    city_map = row["city_map"]
+    if isinstance(city_map, str):
+        city_map = json.loads(city_map)
+
+    empty = _find_empty_tiles(city_map)
+
+    if not empty:
+        raise HTTPException(status_code=400, detail="City is full — no empty tiles")
+
+    if body.count is not None:
+        tiles_to_fill = random.sample(empty, k=min(body.count, len(empty)))
+    else:
+        tiles_to_fill = empty
+
+    building_types = ["house", "apartment", "skyscraper"]
+    new_map = [cells[:] for cells in city_map]
+    for r, c in tiles_to_fill:
+        new_map[r][c] = random.choice(building_types)
+
+    row = await db.update_group(group_id, city_map=new_map)
     return db.row_to_response(row)
 
 
