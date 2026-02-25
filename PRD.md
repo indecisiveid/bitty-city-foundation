@@ -4,6 +4,11 @@
 
 A group accountability app where completing a shared daily goal builds a virtual city. Consecutive completions upgrade buildings; missed days trigger asteroid destruction events. Backend serves 1–4 person friend groups.
 
+
+This will be using Render, so please deploy this with render.
+
+Use Render Websevice, render postgres, and fastapi python please!
+
 ---
 
 ## Data Model
