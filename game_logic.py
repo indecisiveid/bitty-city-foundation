@@ -42,21 +42,26 @@ def get_processing_date(goal_reset_time: str) -> str:
     return reset_today.strftime("%Y-%m-%d")
 
 
-def _find_empty_tiles(city_map: list[list]) -> list[list[int]]:
+GRID_ROWS = 4
+GRID_COLS = 5
+
+
+def _find_empty_tiles(city_map: dict[str, list]) -> list[list[int]]:
     """Find all empty or rubble tiles."""
     tiles = []
-    for r, row in enumerate(city_map):
-        for c, cell in enumerate(row):
-            if cell is None or cell == "rubble":
+    for r in range(GRID_ROWS):
+        for c in range(GRID_COLS):
+            if city_map[str(r)][c] is None or city_map[str(r)][c] == "rubble":
                 tiles.append([r, c])
     return tiles
 
 
-def _find_occupied_tiles(city_map: list[list]) -> list[tuple[int, int, str]]:
+def _find_occupied_tiles(city_map: dict[str, list]) -> list[tuple[int, int, str]]:
     """Find all tiles with buildings. Returns (row, col, building_type)."""
     tiles = []
-    for r, row in enumerate(city_map):
-        for c, cell in enumerate(row):
+    for r in range(GRID_ROWS):
+        for c in range(GRID_COLS):
+            cell = city_map[str(r)][c]
             if cell in ("house", "apartment", "skyscraper"):
                 tiles.append((r, c, cell))
     return tiles
@@ -66,7 +71,7 @@ def process_end_of_day(
     group_members: list[str],
     completions_today: list[str],
     current_build: dict | None,
-    city_map: list[list],
+    city_map: dict[str, list],
     streak: int,
 ) -> dict:
     """
@@ -90,11 +95,11 @@ def process_end_of_day(
         if new_days >= current_build["days_required"]:
             # Building complete — place on random empty/rubble tile
             empty = _find_empty_tiles(city_map)
-            new_map = [row[:] for row in city_map]  # deep copy
+            new_map = {k: row[:] for k, row in city_map.items()}  # deep copy
 
             if empty:
                 tile = random.choice(empty)
-                new_map[tile[0]][tile[1]] = current_build["type"]
+                new_map[str(tile[0])][tile[1]] = current_build["type"]
                 updates["city_map"] = new_map
                 updates["pending_event"] = {
                     "event_id": f"evt_{uuid.uuid4().hex[:12]}",
@@ -153,11 +158,11 @@ def process_end_of_day(
                         remaining.pop(pos)
                         remaining_weights.pop(pos)
 
-                    new_map = [row[:] for row in city_map]
+                    new_map = {k: row[:] for k, row in city_map.items()}
                     tiles_destroyed = []
                     for idx in destroyed_indices:
                         r, c, _ = occupied[idx]
-                        new_map[r][c] = "rubble"
+                        new_map[str(r)][c] = "rubble"
                         tiles_destroyed.append([r, c])
 
                     updates["city_map"] = new_map

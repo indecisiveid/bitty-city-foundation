@@ -105,7 +105,9 @@ export const demoFillCity = onCall(async (request) => {
   }
 
   const buildingTypes = ["house", "apartment", "skyscraper"];
-  const newMap = cityMap.map((row: (string | null)[]) => [...row]);
+  const newMap = Object.fromEntries(
+    Object.entries(cityMap).map(([k, row]) => [k, [...(row as (string | null)[])]]),
+  );
   for (const [r, c] of tilesToFill) {
     newMap[r][c] = buildingTypes[Math.floor(Math.random() * buildingTypes.length)];
   }

@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS groups (
 );
 """
 
-EMPTY_CITY = [[None]*5 for _ in range(4)]
+EMPTY_CITY = {str(i): [None]*5 for i in range(4)}
 
 
 async def init_pool():

@@ -155,7 +155,7 @@ async def select_build(group_id: str, body: SelectBuild):
     # Check if city is full
     has_empty = any(
         cell is None or cell == "rubble"
-        for r in city_map
+        for r in city_map.values()
         for cell in r
     )
     if not has_empty:
@@ -232,9 +232,9 @@ async def demo_fill_city(group_id: str, body: FillCity = FillCity()):
         tiles_to_fill = empty
 
     building_types = ["house", "apartment", "skyscraper"]
-    new_map = [cells[:] for cells in city_map]
+    new_map = {k: cells[:] for k, cells in city_map.items()}
     for r, c in tiles_to_fill:
-        new_map[r][c] = random.choice(building_types)
+        new_map[str(r)][c] = random.choice(building_types)
 
     row = await db.update_group(group_id, city_map=new_map)
     return db.row_to_response(row)

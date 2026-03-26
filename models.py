@@ -59,7 +59,7 @@ class GroupResponse(BaseModel):
     completions_today: list[str]
     streak: int
     current_build: Optional[CurrentBuild] = None
-    city_map: list[list[Optional[str]]]
+    city_map: dict[str, list[Optional[str]]]
     last_processed_date: Optional[str] = None
     pending_event: Optional[PendingEvent] = None
     created_at: str

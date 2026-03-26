@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
+import { GRID_ROWS, GRID_COLS } from "./utils";
 
 export const BUILDING_DAYS: Record<string, number> = {
   house: 1,
@@ -13,7 +14,7 @@ const DESTROY_WEIGHTS: Record<string, number> = {
   skyscraper: 1,
 };
 
-export type CityMap = (string | null)[][];
+export type CityMap = Record<string, (string | null)[]>;
 
 export interface CurrentBuild {
   type: string;
@@ -95,8 +96,8 @@ function formatDate(d: Date): string {
 
 export function findEmptyTiles(cityMap: CityMap): number[][] {
   const tiles: number[][] = [];
-  for (let r = 0; r < cityMap.length; r++) {
-    for (let c = 0; c < cityMap[r].length; c++) {
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
       if (cityMap[r][c] === null || cityMap[r][c] === "rubble") {
         tiles.push([r, c]);
       }
@@ -109,8 +110,8 @@ export function findOccupiedTiles(
   cityMap: CityMap,
 ): { row: number; col: number; type: string }[] {
   const tiles: { row: number; col: number; type: string }[] = [];
-  for (let r = 0; r < cityMap.length; r++) {
-    for (let c = 0; c < cityMap[r].length; c++) {
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
       const cell = cityMap[r][c];
       if (cell === "house" || cell === "apartment" || cell === "skyscraper") {
         tiles.push({ row: r, col: c, type: cell });
@@ -170,7 +171,9 @@ export function processEndOfDay(params: {
     if (newDays >= currentBuild.days_required) {
       // Building complete — place on random empty/rubble tile
       const empty = findEmptyTiles(cityMap);
-      const newMap = cityMap.map((row) => [...row]); // deep copy
+      const newMap: CityMap = Object.fromEntries(
+        Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
+      );
 
       if (empty.length > 0) {
         const tileIdx = Math.floor(Math.random() * empty.length);
@@ -235,7 +238,9 @@ export function processEndOfDay(params: {
             remainingWeights.splice(idx, 1);
           }
 
-          const newMap = cityMap.map((row) => [...row]);
+          const newMap: CityMap = Object.fromEntries(
+            Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
+          );
           const tilesDestroyed: number[][] = [];
           for (const idx of destroyedIndices) {
             const { row, col } = occupied[idx];
