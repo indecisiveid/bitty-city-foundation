@@ -28,7 +28,7 @@ function groupToResponse(groupId: string, data: FirebaseFirestore.DocumentData) 
 
 // --- demoAsteroid ---
 
-export const demoAsteroid = onCall(async (request) => {
+export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_id } = request.data;
 
   if (!group_id) {
@@ -72,7 +72,7 @@ export const demoAsteroid = onCall(async (request) => {
 
 // --- demoFillCity ---
 
-export const demoFillCity = onCall(async (request) => {
+export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_id, count } = request.data;
 
   if (!group_id) {

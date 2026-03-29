@@ -58,7 +58,7 @@ async function maybeProcessDay(
 
 // --- createGroup ---
 
-export const createGroup = onCall(async (request) => {
+export const createGroup = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_name, member, daily_goal, goal_reset_time = "00:00" } =
     request.data;
 
@@ -117,7 +117,7 @@ export const createGroup = onCall(async (request) => {
 
 // --- joinGroup ---
 
-export const joinGroup = onCall(async (request) => {
+export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_code, member } = request.data;
 
   if (!group_code || !member) {
@@ -168,7 +168,7 @@ export const joinGroup = onCall(async (request) => {
 
 // --- getGroup ---
 
-export const getGroup = onCall(async (request) => {
+export const getGroup = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_id } = request.data;
 
   if (!group_id) {
@@ -186,7 +186,7 @@ export const getGroup = onCall(async (request) => {
 
 // --- completeGoal ---
 
-export const completeGoal = onCall(async (request) => {
+export const completeGoal = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_id, member } = request.data;
 
   if (!group_id || !member) {
@@ -234,7 +234,7 @@ export const completeGoal = onCall(async (request) => {
 
 // --- selectBuild ---
 
-export const selectBuild = onCall(async (request) => {
+export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_id, member, type } = request.data;
 
   if (!group_id || !member || !type) {
@@ -296,7 +296,7 @@ export const selectBuild = onCall(async (request) => {
 
 // --- deleteGroup ---
 
-export const deleteGroup = onCall(async (request) => {
+export const deleteGroup = onCall({ enforceAppCheck: true }, async (request) => {
   const { group_id } = request.data;
 
   if (!group_id) {
