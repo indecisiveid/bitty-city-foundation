@@ -30,6 +30,19 @@ class FillCity(BaseModel):
     count: Optional[int] = None  # how many tiles to fill; None = all empty
 
 
+class SetBuildings(BaseModel):
+    """
+    Demo-only: replaces the entire city_map with `count` tiles of `type`
+    (default 'house'), placed in row-major order. Also clears
+    current_build, pending_event, completions_today, and resets streak
+    so dev mutations leave the group in a known-clean state — no stale
+    half-built state left over to collide with subsequent real actions
+    (e.g. select_build returning "build already in progress").
+    """
+    count: int = 0
+    type: str = "house"  # "house" | "apartment" | "skyscraper"
+
+
 # --- Nested Models ---
 
 class CurrentBuild(BaseModel):

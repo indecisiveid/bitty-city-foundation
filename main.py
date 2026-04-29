@@ -7,7 +7,10 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 import database as db
-from models import CreateGroup, JoinGroup, CompleteGoal, SelectBuild, FillCity, GroupResponse
+from models import (
+    CreateGroup, JoinGroup, CompleteGoal, SelectBuild, FillCity, SetBuildings,
+    GroupResponse,
+)
 from game_logic import (
     needs_day_processing, get_processing_date, process_end_of_day, BUILDING_DAYS,
     _find_occupied_tiles, _find_empty_tiles,
@@ -238,6 +241,61 @@ async def demo_fill_city(group_id: str, body: FillCity = FillCity()):
 
     row = await db.update_group(group_id, city_map=new_map)
     return db.row_to_response(row)
+
+
+@app.post("/demo/{group_id}/set_buildings", response_model=GroupResponse)
+async def demo_set_buildings(group_id: str, body: SetBuildings):
+    """
+    Demo: deterministically set the city to exactly `count` buildings of
+    `type`, placed in row-major order. Clears anything that could collide
+    with subsequent real actions:
+
+      - current_build → None  (so select_build doesn't 400 with "already
+        in progress" because of leftover state)
+      - pending_event → None
+      - completions_today → []
+      - streak → 0
+
+    The 4×5 grid hard-caps `count` at 20.
+    """
+    row = await db.get_group_by_id(group_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    if body.type not in ("house", "apartment", "skyscraper"):
+        raise HTTPException(status_code=400, detail=f"Invalid type: {body.type}")
+
+    count = max(0, min(20, body.count))
+    new_map: dict[str, list] = {str(r): [None] * 5 for r in range(4)}
+    placed = 0
+    for r in range(4):
+        for c in range(5):
+            if placed >= count:
+                break
+            new_map[str(r)][c] = body.type
+            placed += 1
+        if placed >= count:
+            break
+
+    row = await db.update_group(
+        group_id,
+        city_map=new_map,
+        current_build=None,
+        pending_event=None,
+        completions_today=[],
+        streak=0,
+    )
+    return db.row_to_response(row)
+
+
+@app.post("/demo/{group_id}/reset_city", response_model=GroupResponse)
+async def demo_reset_city(group_id: str):
+    """
+    Demo: convenience wrapper around set_buildings with count=0 — empty
+    map, no current_build, fresh streak. Equivalent to a brand-new group's
+    visual state without re-creating the group.
+    """
+    return await demo_set_buildings(group_id, SetBuildings(count=0))
 
 
 @app.delete("/groups/{group_id}", status_code=204)
