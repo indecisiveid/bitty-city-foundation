@@ -16,8 +16,10 @@ CREATE TABLE IF NOT EXISTS groups (
     group_members TEXT[] NOT NULL DEFAULT '{}',
     daily_goal   TEXT NOT NULL,
     goal_reset_time TEXT NOT NULL DEFAULT '00:00',
+    goal_reset_timezone TEXT NOT NULL DEFAULT 'UTC',
     completions_today TEXT[] NOT NULL DEFAULT '{}',
     streak       INTEGER NOT NULL DEFAULT 0,
+    building_completions TEXT[] NOT NULL DEFAULT '{}',
     current_build JSONB,
     city_map     JSONB NOT NULL,
     last_processed_date TEXT,
@@ -26,7 +28,26 @@ CREATE TABLE IF NOT EXISTS groups (
 );
 """
 
-EMPTY_CITY = {str(i): [None]*5 for i in range(4)}
+# Idempotent migrations for existing prod databases. Each one is a no-op
+# once applied so they're safe to rerun on every startup.
+MIGRATIONS = [
+    """ALTER TABLE groups
+       ADD COLUMN IF NOT EXISTS goal_reset_timezone TEXT NOT NULL DEFAULT 'UTC';""",
+    # building_completions: ordered list of "YYYY-MM-DD" strings, one per
+    # day a building landed in the city. The streak is derived from this:
+    # consecutive recent dates (ending at today or yesterday) = streak count.
+    # Storing the log lets us prove the streak from data, not just
+    # increment-and-pray.
+    """ALTER TABLE groups
+       ADD COLUMN IF NOT EXISTS building_completions TEXT[] NOT NULL DEFAULT '{}';""",
+]
+
+# 10×10 city grid = 100 lots. Bumped from 4×5 to support indefinite city
+# growth in the client's persistent layout. Existing groups created with
+# the old 4×5 shape are still handled correctly — `_find_empty_tiles` and
+# `_find_occupied_tiles` in game_logic.py iterate `city_map.items()`
+# dynamically, so legacy maps work without migration.
+EMPTY_CITY = {str(i): [None]*10 for i in range(10)}
 
 
 async def init_pool():
@@ -38,6 +59,8 @@ async def init_pool():
     )
     async with pool.acquire() as conn:
         await conn.execute(CREATE_TABLE)
+        for sql in MIGRATIONS:
+            await conn.execute(sql)
 
 
 async def close_pool():
@@ -71,8 +94,10 @@ def row_to_response(row: asyncpg.Record) -> GroupResponse:
         group_members=list(row["group_members"]),
         daily_goal=row["daily_goal"],
         goal_reset_time=row["goal_reset_time"],
+        goal_reset_timezone=row["goal_reset_timezone"],
         completions_today=list(row["completions_today"]),
         streak=row["streak"],
+        building_completions=list(row["building_completions"]),
         current_build=current_build,
         city_map=city_map,
         last_processed_date=row["last_processed_date"],
@@ -81,7 +106,13 @@ def row_to_response(row: asyncpg.Record) -> GroupResponse:
     )
 
 
-async def create_group(group_name: str, member: str, daily_goal: str, goal_reset_time: str) -> GroupResponse:
+async def create_group(
+    group_name: str,
+    member: str,
+    daily_goal: str,
+    goal_reset_time: str,
+    goal_reset_timezone: str = "UTC",
+) -> GroupResponse:
     group_id = str(uuid.uuid4())
     group_code = _generate_group_code()
     city_map = json.dumps(EMPTY_CITY)
@@ -92,11 +123,11 @@ async def create_group(group_name: str, member: str, daily_goal: str, goal_reset
             try:
                 row = await conn.fetchrow(
                     """INSERT INTO groups (group_id, group_code, group_name, group_members,
-                       daily_goal, goal_reset_time, city_map)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                       daily_goal, goal_reset_time, goal_reset_timezone, city_map)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
                        RETURNING *""",
                     group_id, group_code, group_name, [member],
-                    daily_goal, goal_reset_time, city_map,
+                    daily_goal, goal_reset_time, goal_reset_timezone, city_map,
                 )
                 return row_to_response(row)
             except asyncpg.UniqueViolationError:

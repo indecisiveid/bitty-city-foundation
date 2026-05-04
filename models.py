@@ -9,7 +9,8 @@ class CreateGroup(BaseModel):
     group_name: str
     member: str
     daily_goal: str
-    goal_reset_time: str = "00:00"  # HH:MM UTC
+    goal_reset_time: str = "00:00"               # HH:MM in goal_reset_timezone
+    goal_reset_timezone: str = "UTC"             # IANA tz name, e.g. "America/Los_Angeles"
 
 
 class JoinGroup(BaseModel):
@@ -69,8 +70,10 @@ class GroupResponse(BaseModel):
     group_members: list[str]
     daily_goal: str
     goal_reset_time: str
+    goal_reset_timezone: str = "UTC"
     completions_today: list[str]
     streak: int
+    building_completions: list[str] = []  # list of "YYYY-MM-DD"
     current_build: Optional[CurrentBuild] = None
     city_map: dict[str, list[Optional[str]]]
     last_processed_date: Optional[str] = None

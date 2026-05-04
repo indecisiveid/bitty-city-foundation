@@ -40,7 +40,8 @@ app.add_middleware(
 
 async def maybe_process_day(row) -> GroupResponse:
     """Run lazy end-of-day processing if needed, then return response."""
-    if needs_day_processing(row["goal_reset_time"], row["last_processed_date"]):
+    tz_name = row["goal_reset_timezone"] if "goal_reset_timezone" in row else "UTC"
+    if needs_day_processing(row["goal_reset_time"], row["last_processed_date"], tz_name):
         current_build = row["current_build"]
         if isinstance(current_build, str):
             current_build = json.loads(current_build)
@@ -49,14 +50,19 @@ async def maybe_process_day(row) -> GroupResponse:
         if isinstance(city_map, str):
             city_map = json.loads(city_map)
 
+        processing_date = get_processing_date(row["goal_reset_time"], tz_name)
+        building_completions = list(row["building_completions"]) if "building_completions" in row else []
+
         updates = process_end_of_day(
             group_members=list(row["group_members"]),
             completions_today=list(row["completions_today"]),
             current_build=current_build,
             city_map=city_map,
             streak=row["streak"],
+            building_completions=building_completions,
+            processing_date=processing_date,
         )
-        updates["last_processed_date"] = get_processing_date(row["goal_reset_time"])
+        updates["last_processed_date"] = processing_date
 
         row = await db.update_group(row["group_id"], **updates)
 
@@ -72,6 +78,7 @@ async def create_group(body: CreateGroup):
         member=body.member,
         daily_goal=body.daily_goal,
         goal_reset_time=body.goal_reset_time,
+        goal_reset_timezone=body.goal_reset_timezone,
     )
 
 
@@ -114,7 +121,7 @@ async def complete_goal(group_id: str, body: CompleteGoal):
         raise HTTPException(status_code=400, detail="Not a member of this group")
 
     # Run day processing first
-    if needs_day_processing(row["goal_reset_time"], row["last_processed_date"]):
+    if needs_day_processing(row["goal_reset_time"], row["last_processed_date"], row["goal_reset_timezone"] if "goal_reset_timezone" in row else "UTC"):
         resp = await maybe_process_day(row)
         # Re-fetch after processing
         row = await db.get_group_by_id(group_id)
@@ -140,7 +147,7 @@ async def select_build(group_id: str, body: SelectBuild):
         raise HTTPException(status_code=404, detail="Group not found")
 
     # Run day processing first
-    if needs_day_processing(row["goal_reset_time"], row["last_processed_date"]):
+    if needs_day_processing(row["goal_reset_time"], row["last_processed_date"], row["goal_reset_timezone"] if "goal_reset_timezone" in row else "UTC"):
         await maybe_process_day(row)
         row = await db.get_group_by_id(group_id)
 
@@ -256,7 +263,7 @@ async def demo_set_buildings(group_id: str, body: SetBuildings):
       - completions_today → []
       - streak → 0
 
-    The 4×5 grid hard-caps `count` at 20.
+    The 10×10 grid hard-caps `count` at 100.
     """
     row = await db.get_group_by_id(group_id)
     if not row:
@@ -265,11 +272,13 @@ async def demo_set_buildings(group_id: str, body: SetBuildings):
     if body.type not in ("house", "apartment", "skyscraper"):
         raise HTTPException(status_code=400, detail=f"Invalid type: {body.type}")
 
-    count = max(0, min(20, body.count))
-    new_map: dict[str, list] = {str(r): [None] * 5 for r in range(4)}
+    GRID = 10
+    MAX_COUNT = GRID * GRID
+    count = max(0, min(MAX_COUNT, body.count))
+    new_map: dict[str, list] = {str(r): [None] * GRID for r in range(GRID)}
     placed = 0
-    for r in range(4):
-        for c in range(5):
+    for r in range(GRID):
+        for c in range(GRID):
             if placed >= count:
                 break
             new_map[str(r)][c] = body.type
@@ -284,6 +293,10 @@ async def demo_set_buildings(group_id: str, body: SetBuildings):
         pending_event=None,
         completions_today=[],
         streak=0,
+        # Reset the completions log too — otherwise demo-set N buildings
+        # would still show the old streak from prior real activity, which
+        # is misleading when the city was just reset to an arbitrary state.
+        building_completions=[],
     )
     return db.row_to_response(row)
 

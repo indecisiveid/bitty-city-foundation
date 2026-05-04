@@ -1,6 +1,7 @@
 import random
 import uuid
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 BUILDING_DAYS = {"house": 1, "apartment": 3, "skyscraper": 7}
@@ -9,31 +10,54 @@ BUILDING_DAYS = {"house": 1, "apartment": 3, "skyscraper": 7}
 DESTROY_WEIGHTS = {"house": 3, "apartment": 2, "skyscraper": 1}
 
 
-def needs_day_processing(goal_reset_time: str, last_processed_date: str | None) -> bool:
-    """Check if end-of-day processing should run."""
-    now = datetime.now(timezone.utc)
+def _resolve_tz(tz_name: str) -> ZoneInfo:
+    """Look up an IANA timezone by name; fall back to UTC if invalid.
+
+    A bad string in `goal_reset_timezone` shouldn't crash end-of-day
+    processing — log-and-fallback is safer than 500ing every request for
+    that group.
+    """
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("UTC")
+
+
+def needs_day_processing(
+    goal_reset_time: str,
+    last_processed_date: str | None,
+    goal_reset_timezone: str = "UTC",
+) -> bool:
+    """Check if end-of-day processing should run.
+
+    Reset is "HH:MM in `goal_reset_timezone`". This means a city created
+    by a user in Los Angeles with reset 07:00 ticks at 7am Pacific —
+    independent of where the server runs OR where joining members live.
+    """
+    tz = _resolve_tz(goal_reset_timezone)
+    now = datetime.now(tz)
     hour, minute = map(int, goal_reset_time.split(":"))
 
-    # Build today's reset datetime in UTC
     reset_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # If we haven't passed today's reset yet, no processing needed
     if now < reset_today:
-        # Check against yesterday's date
         check_date = (reset_today - timedelta(days=1)).strftime("%Y-%m-%d")
     else:
         check_date = reset_today.strftime("%Y-%m-%d")
 
-    # If already processed for this period, skip
     if last_processed_date == check_date:
         return False
 
     return True
 
 
-def get_processing_date(goal_reset_time: str) -> str:
+def get_processing_date(
+    goal_reset_time: str,
+    goal_reset_timezone: str = "UTC",
+) -> str:
     """Get the date string for the current processing period."""
-    now = datetime.now(timezone.utc)
+    tz = _resolve_tz(goal_reset_timezone)
+    now = datetime.now(tz)
     hour, minute = map(int, goal_reset_time.split(":"))
     reset_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
@@ -42,29 +66,66 @@ def get_processing_date(goal_reset_time: str) -> str:
     return reset_today.strftime("%Y-%m-%d")
 
 
-GRID_ROWS = 4
-GRID_COLS = 5
+GRID_ROWS = 10
+GRID_COLS = 10
 
 
 def _find_empty_tiles(city_map: dict[str, list]) -> list[list[int]]:
-    """Find all empty or rubble tiles."""
+    """Find all empty or rubble tiles. Iterates the city_map's actual rows
+    so legacy 4×5 maps and the new 10×10 maps are both handled correctly."""
     tiles = []
-    for r in range(GRID_ROWS):
-        for c in range(GRID_COLS):
-            if city_map[str(r)][c] is None or city_map[str(r)][c] == "rubble":
+    for r_str, row in city_map.items():
+        r = int(r_str)
+        for c, cell in enumerate(row):
+            if cell is None or cell == "rubble":
                 tiles.append([r, c])
     return tiles
 
 
 def _find_occupied_tiles(city_map: dict[str, list]) -> list[tuple[int, int, str]]:
-    """Find all tiles with buildings. Returns (row, col, building_type)."""
+    """Find all tiles with buildings. Returns (row, col, building_type).
+    Dimension-agnostic — works for any city_map shape."""
     tiles = []
-    for r in range(GRID_ROWS):
-        for c in range(GRID_COLS):
-            cell = city_map[str(r)][c]
+    for r_str, row in city_map.items():
+        r = int(r_str)
+        for c, cell in enumerate(row):
             if cell in ("house", "apartment", "skyscraper"):
                 tiles.append((r, c, cell))
     return tiles
+
+
+def compute_streak(completion_dates: list[str], today_str: str) -> int:
+    """Streak = consecutive recent days, ending at today or yesterday,
+    on which a building was placed in the city. Anything older is OK to
+    keep in the log, it just doesn't count toward the current run.
+
+    Examples (today = 2026-05-04):
+      [2026-05-04]                              → 1     (today)
+      [2026-05-03, 2026-05-04]                  → 2     (yesterday + today)
+      [2026-05-03]                              → 1     (yesterday only)
+      [2026-05-02, 2026-05-04]                  → 1     (gap day; today only)
+      [2026-05-02]                              → 0     (most recent is 2 days ago)
+      []                                        → 0
+    """
+    if not completion_dates:
+        return 0
+    today = datetime.strptime(today_str, "%Y-%m-%d").date()
+    yesterday = today - timedelta(days=1)
+    parsed = sorted(
+        {datetime.strptime(d, "%Y-%m-%d").date() for d in completion_dates},
+        reverse=True,
+    )
+    if parsed[0] != today and parsed[0] != yesterday:
+        return 0
+    streak = 1
+    expected = parsed[0] - timedelta(days=1)
+    for d in parsed[1:]:
+        if d == expected:
+            streak += 1
+            expected -= timedelta(days=1)
+        else:
+            break
+    return streak
 
 
 def process_end_of_day(
@@ -72,19 +133,33 @@ def process_end_of_day(
     completions_today: list[str],
     current_build: dict | None,
     city_map: dict[str, list],
-    streak: int,
+    streak: int,                            # legacy param — recomputed below
+    building_completions: list[str],
+    processing_date: str,
 ) -> dict:
     """
     Pure function: returns a dict of fields to update on the group row.
     Does NOT modify inputs.
+
+    `processing_date` is the date string ("YYYY-MM-DD") that this
+    end-of-day pass is processing — i.e. the day that just ended in the
+    group's local timezone. We pass it in (rather than recomputing here)
+    so the caller's `last_processed_date` and our `building_completions`
+    entries are guaranteed to use the same day boundary.
     """
     updates: dict = {
         "completions_today": [],
     }
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # No active build — just clear completions
+    # Streak depends on the current building_completions log, regardless
+    # of whether a build was active. Compute it once at the bottom.
+    new_completions = list(building_completions)
+
+    # No active build — just clear completions, but also recompute streak
+    # in case time passed and the run expired.
     if current_build is None:
+        updates["streak"] = compute_streak(new_completions, processing_date)
         return updates
 
     all_completed = set(group_members).issubset(set(completions_today))
@@ -108,19 +183,23 @@ def process_end_of_day(
                     "tile": tile,
                     "timestamp": now_iso,
                 }
+                # Log the landing date so the streak math has data to
+                # work with. De-dupe in case a day somehow gets processed
+                # twice (idempotency safety).
+                if processing_date not in new_completions:
+                    new_completions.append(processing_date)
 
             updates["current_build"] = None
-            updates["streak"] = 0
         else:
-            # Streak continues
+            # Build advances; no building landed today, so the
+            # building_completions log is unchanged. Streak will reflect
+            # whatever the most recent landing date was.
             updates["current_build"] = {
                 **current_build,
                 "days_completed": new_days,
             }
-            updates["streak"] = streak + 1
     else:
         # Failed — asteroid
-        updates["streak"] = 0
         updates["current_build"] = None
 
         occupied = _find_occupied_tiles(city_map)
@@ -173,4 +252,13 @@ def process_end_of_day(
                         "timestamp": now_iso,
                     }
 
+    # Single source of truth for streak: derive it from the (possibly
+    # appended-to) completions log relative to the day we just processed.
+    # This guarantees the displayed number always matches the dates in
+    # the database — no drift from increment/decrement bugs.
+    updates["building_completions"] = new_completions
+    updates["streak"] = compute_streak(new_completions, processing_date)
+    # `streak` arg above is now ignored — kept on the signature for backwards
+    # compatibility with any caller that hasn't migrated yet.
+    _ = streak
     return updates
