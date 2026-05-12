@@ -4,6 +4,7 @@ import {
   processEndOfDay,
   findEmptyTiles,
   findOccupiedTiles,
+  getProcessingDate,
 } from "./gameLogic";
 
 const db = () => getFirestore();
@@ -56,12 +57,18 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
     currentBuild = { type: "house", days_required: 1, days_completed: 0 };
   }
 
+  const processingDate = getProcessingDate(
+    data.goal_reset_time,
+    data.goal_reset_timezone ?? "UTC",
+  );
   const updates = processEndOfDay({
     groupMembers: data.group_members,
     completionsToday: [], // empty = failed day = asteroid
     currentBuild,
     cityMap,
     streak: data.streak,
+    buildingCompletions: data.building_completions ?? [],
+    processingDate,
   });
 
   await groupRef.update({ ...updates });

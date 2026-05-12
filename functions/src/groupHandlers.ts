@@ -34,21 +34,25 @@ async function maybeProcessDay(
   groupId: string,
   data: FirebaseFirestore.DocumentData,
 ): Promise<FirebaseFirestore.DocumentData> {
-  if (!needsDayProcessing(data.goal_reset_time, data.last_processed_date)) {
+  const goalResetTimezone: string = data.goal_reset_timezone ?? "UTC";
+  if (!needsDayProcessing(data.goal_reset_time, data.last_processed_date, goalResetTimezone)) {
     return data;
   }
 
+  const processingDate = getProcessingDate(data.goal_reset_time, goalResetTimezone);
   const updates = processEndOfDay({
     groupMembers: data.group_members,
     completionsToday: data.completions_today,
     currentBuild: data.current_build ?? null,
     cityMap: data.city_map,
     streak: data.streak,
+    buildingCompletions: data.building_completions ?? [],
+    processingDate,
   });
 
   const writeUpdates: Record<string, unknown> = {
     ...updates,
-    last_processed_date: getProcessingDate(data.goal_reset_time),
+    last_processed_date: processingDate,
   };
 
   await db().collection("groups").doc(groupId).update(writeUpdates);
