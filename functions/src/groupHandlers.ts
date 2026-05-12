@@ -20,12 +20,14 @@ function groupToResponse(groupId: string, data: FirebaseFirestore.DocumentData) 
     group_members: data.group_members,
     daily_goal: data.daily_goal,
     goal_reset_time: data.goal_reset_time,
+    goal_reset_timezone: data.goal_reset_timezone ?? "UTC",
     completions_today: data.completions_today,
     streak: data.streak,
     current_build: data.current_build ?? null,
     city_map: data.city_map,
     last_processed_date: data.last_processed_date ?? null,
     pending_event: data.pending_event ?? null,
+    building_completions: data.building_completions ?? [],
     created_at: data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
   };
 }
@@ -63,8 +65,13 @@ async function maybeProcessDay(
 // --- createGroup ---
 
 export const createGroup = onCall({ enforceAppCheck: true }, async (request) => {
-  const { group_name, member, daily_goal, goal_reset_time = "00:00" } =
-    request.data;
+  const {
+    group_name,
+    member,
+    daily_goal,
+    goal_reset_time = "00:00",
+    goal_reset_timezone = "UTC",
+  } = request.data;
 
   if (!group_name || !member || !daily_goal) {
     throw new HttpsError("invalid-argument", "group_name, member, and daily_goal are required");
@@ -92,12 +99,14 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           group_members: [member],
           daily_goal,
           goal_reset_time,
+          goal_reset_timezone,
           completions_today: [],
           streak: 0,
           current_build: null,
           city_map: EMPTY_CITY,
           last_processed_date: null,
           pending_event: null,
+          building_completions: [],
           created_at: FieldValue.serverTimestamp(),
         };
 
@@ -212,7 +221,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     throw new HttpsError("failed-precondition", "Not a member of this group");
   }
 
-  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date)) {
+  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
     data = await maybeProcessDay(group_id, data);
   }
 
@@ -263,7 +272,7 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
 
   let data = snap.data()!;
 
-  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date)) {
+  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
     data = await maybeProcessDay(group_id, data);
   }
 

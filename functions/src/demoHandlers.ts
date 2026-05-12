@@ -17,12 +17,14 @@ function groupToResponse(groupId: string, data: FirebaseFirestore.DocumentData) 
     group_members: data.group_members,
     daily_goal: data.daily_goal,
     goal_reset_time: data.goal_reset_time,
+    goal_reset_timezone: data.goal_reset_timezone ?? "UTC",
     completions_today: data.completions_today,
     streak: data.streak,
     current_build: data.current_build ?? null,
     city_map: data.city_map,
     last_processed_date: data.last_processed_date ?? null,
     pending_event: data.pending_event ?? null,
+    building_completions: data.building_completions ?? [],
     created_at: data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
   };
 }

@@ -8,8 +8,8 @@ export function generateGroupCode(): string {
   return code;
 }
 
-export const GRID_ROWS = 4;
-export const GRID_COLS = 5;
+export const GRID_ROWS = 10;
+export const GRID_COLS = 10;
 
 export const EMPTY_CITY: Record<string, (string | null)[]> = Object.fromEntries(
   Array.from({ length: GRID_ROWS }, (_, i) => [String(i), Array(GRID_COLS).fill(null)]),
