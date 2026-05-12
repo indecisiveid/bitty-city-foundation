@@ -6,6 +6,7 @@ import {
   findOccupiedTiles,
   getProcessingDate,
 } from "./gameLogic";
+import { EMPTY_CITY, GRID_ROWS, GRID_COLS } from "./utils";
 
 const db = () => getFirestore();
 
@@ -122,6 +123,97 @@ export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) =>
   }
 
   await groupRef.update({ city_map: newMap });
+
+  const updatedSnap = await groupRef.get();
+  return groupToResponse(group_id, updatedSnap.data()!);
+});
+
+// --- demoSetBuildings ---
+// Port of Python `main.py` set_buildings endpoint.
+// Builds a fresh city map with exactly `count` buildings of `type`
+// placed row-major, then resets all build/streak/event state.
+
+export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request) => {
+  const { group_id, count, type = "house" } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const validTypes = ["house", "apartment", "skyscraper"];
+  if (!validTypes.includes(type)) {
+    throw new HttpsError(
+      "invalid-argument",
+      `type must be one of: ${validTypes.join(", ")}`,
+    );
+  }
+
+  const maxTiles = GRID_ROWS * GRID_COLS;
+  const clampedCount = Math.max(0, Math.min(Number(count) || 0, maxTiles));
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  // Start from a fresh empty city and fill row-major up to clampedCount
+  const newMap = Object.fromEntries(
+    Object.entries(EMPTY_CITY).map(([k, row]) => [k, [...row]]),
+  );
+
+  let placed = 0;
+  outer: for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
+      if (placed >= clampedCount) break outer;
+      newMap[String(r)][c] = type;
+      placed++;
+    }
+  }
+
+  await groupRef.update({
+    city_map: newMap,
+    current_build: null,
+    pending_event: null,
+    completions_today: [],
+    streak: 0,
+    building_completions: [],
+  });
+
+  const updatedSnap = await groupRef.get();
+  return groupToResponse(group_id, updatedSnap.data()!);
+});
+
+// --- demoResetCity ---
+// Equivalent to demoSetBuildings with count = 0.
+
+export const demoResetCity = onCall({ enforceAppCheck: true }, async (request) => {
+  const { group_id } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  const emptyMap = Object.fromEntries(
+    Object.entries(EMPTY_CITY).map(([k, row]) => [k, [...row]]),
+  );
+
+  await groupRef.update({
+    city_map: emptyMap,
+    current_build: null,
+    pending_event: null,
+    completions_today: [],
+    streak: 0,
+    building_completions: [],
+  });
 
   const updatedSnap = await groupRef.get();
   return groupToResponse(group_id, updatedSnap.data()!);

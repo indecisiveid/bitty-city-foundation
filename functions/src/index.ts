@@ -11,4 +11,4 @@ export {
   deleteGroup,
 } from "./groupHandlers";
 
-export { demoAsteroid, demoFillCity } from "./demoHandlers";
+export { demoAsteroid, demoFillCity, demoSetBuildings, demoResetCity } from "./demoHandlers";
