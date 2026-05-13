@@ -25,7 +25,10 @@ export interface CurrentBuild {
 export interface PendingEvent {
   event_id: string;
   type: "build_complete" | "asteroid";
-  tiles_destroyed?: number[][];
+  // Firestore rejects nested arrays in document writes. Each destroyed
+  // tile is therefore stored as an object `{row, col}` rather than a
+  // `[row, col]` tuple, even though the latter would be more compact.
+  tiles_destroyed?: Array<{ row: number; col: number }>;
   building?: string;
   tile?: number[];
   timestamp: string;
@@ -343,11 +346,11 @@ export function processEndOfDay(params: {
           const newMap: CityMap = Object.fromEntries(
             Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
           );
-          const tilesDestroyed: number[][] = [];
+          const tilesDestroyed: Array<{ row: number; col: number }> = [];
           for (const idx of destroyedOriginalIndices) {
             const { row, col } = occupied[idx];
             newMap[row][col] = "rubble";
-            tilesDestroyed.push([row, col]);
+            tilesDestroyed.push({ row, col });
           }
 
           updates.city_map = newMap;
