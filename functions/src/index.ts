@@ -9,6 +9,9 @@ export {
   completeGoal,
   selectBuild,
   deleteGroup,
+  leaveGroup,
+  repairStreak,
+  upsertProfile,
 } from "./groupHandlers";
 
 export { demoAsteroid, demoFillCity, demoSetBuildings, demoResetCity } from "./demoHandlers";

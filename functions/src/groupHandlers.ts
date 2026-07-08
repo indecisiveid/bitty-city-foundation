@@ -1,35 +1,62 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { v4 as uuidv4 } from "uuid";
+import { DateTime } from "luxon";
 import {
   needsDayProcessing,
   getProcessingDate,
   processEndOfDay,
+  applyStreakRepair,
+  isFirstDayGrace,
   findEmptyTiles,
   BUILDING_DAYS,
+  STARTING_FREEZES,
 } from "./gameLogic";
-import { generateGroupCode, EMPTY_CITY } from "./utils";
+import {
+  generateGroupCode,
+  groupToResponse,
+  requireTrimmed,
+  requireResetTime,
+  EMPTY_CITY,
+  MAX_MEMBERS_PER_GROUP,
+  MAX_GROUPS_PER_USER,
+} from "./utils";
+import { requireAuth } from "./auth";
 
 const db = () => getFirestore();
 
-function groupToResponse(groupId: string, data: FirebaseFirestore.DocumentData) {
-  return {
-    group_id: groupId,
-    group_code: data.group_code,
-    group_name: data.group_name,
-    group_members: data.group_members,
-    daily_goal: data.daily_goal,
-    goal_reset_time: data.goal_reset_time,
-    goal_reset_timezone: data.goal_reset_timezone ?? "UTC",
-    completions_today: data.completions_today,
-    streak: data.streak,
-    current_build: data.current_build ?? null,
-    city_map: data.city_map,
-    last_processed_date: data.last_processed_date ?? null,
-    pending_event: data.pending_event ?? null,
-    building_completions: data.building_completions ?? [],
-    created_at: data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
-  };
+/**
+ * Resolve the caller's display name inside a group. Membership is
+ * uid-based (`member_uids`, index-aligned with the display names in
+ * `group_members`); the name remains the currency of the game state
+ * (completions_today etc.) so the UI stays name-driven.
+ */
+function memberNameForUid(
+  data: FirebaseFirestore.DocumentData,
+  uid: string,
+): string {
+  const uids: string[] = data.member_uids ?? [];
+  const idx = uids.indexOf(uid);
+  if (idx === -1) {
+    throw new HttpsError("failed-precondition", "Not a member of this group");
+  }
+  return data.group_members[idx];
+}
+
+function createdAtIso(data: FirebaseFirestore.DocumentData): string | null {
+  return data.created_at?.toDate?.()?.toISOString?.() ?? null;
+}
+
+/** Legacy groups predate last_activity_date — fall back to creation day. */
+function lastActivityFallback(
+  data: FirebaseFirestore.DocumentData,
+  tz: string,
+): string | null {
+  if (data.last_activity_date) return data.last_activity_date;
+  const iso = createdAtIso(data);
+  if (!iso) return null;
+  const dt = DateTime.fromISO(iso).setZone(tz);
+  return dt.isValid ? dt.toISODate() : iso.slice(0, 10);
 }
 
 async function maybeProcessDay(
@@ -42,6 +69,7 @@ async function maybeProcessDay(
   }
 
   const processingDate = getProcessingDate(data.goal_reset_time, goalResetTimezone);
+  const createdIso = createdAtIso(data);
   const updates = processEndOfDay({
     groupMembers: data.group_members,
     completionsToday: data.completions_today,
@@ -50,6 +78,14 @@ async function maybeProcessDay(
     streak: data.streak,
     buildingCompletions: data.building_completions ?? [],
     processingDate,
+    lastActivityDate: lastActivityFallback(data, goalResetTimezone),
+    streakFreezes: data.streak_freezes ?? 0,
+    frozenDates: data.frozen_dates ?? [],
+    brokenStreak: data.broken_streak ?? null,
+    lastInactivityMeteorDate: data.last_inactivity_meteor_date ?? null,
+    isGraceDay: createdIso
+      ? isFirstDayGrace(createdIso, processingDate, data.goal_reset_time, goalResetTimezone)
+      : false,
   });
 
   const writeUpdates: Record<string, unknown> = {
@@ -65,19 +101,19 @@ async function maybeProcessDay(
 // --- createGroup ---
 
 export const createGroup = onCall({ enforceAppCheck: true }, async (request) => {
-  const {
-    group_name,
-    member,
-    daily_goal,
-    goal_reset_time = "00:00",
-    goal_reset_timezone = "UTC",
-  } = request.data;
+  const uid = requireAuth(request);
 
-  if (!group_name || !member || !daily_goal) {
-    throw new HttpsError("invalid-argument", "group_name, member, and daily_goal are required");
-  }
+  const groupName = requireTrimmed(request.data.group_name, "group_name", 3, 40);
+  const member = requireTrimmed(request.data.member, "member", 1, 30);
+  const dailyGoal = requireTrimmed(request.data.daily_goal, "daily_goal", 1, 200);
+  const goalResetTime = requireResetTime(request.data.goal_reset_time ?? "00:00");
+  const goalResetTimezone =
+    typeof request.data.goal_reset_timezone === "string" && request.data.goal_reset_timezone
+      ? request.data.goal_reset_timezone
+      : "UTC";
 
   const groupId = uuidv4();
+  const userRef = db().collection("users").doc(uid);
 
   // Retry up to 5 times on code collision
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -86,22 +122,40 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
     try {
       await db().runTransaction(async (tx) => {
         const codeRef = db().collection("group_codes").doc(code);
-        const codeSnap = await tx.get(codeRef);
+        const [codeSnap, userSnap] = await Promise.all([
+          tx.get(codeRef),
+          tx.get(userRef),
+        ]);
 
         if (codeSnap.exists) {
           throw new Error("CODE_COLLISION");
         }
 
+        const groupIds: string[] = userSnap.data()?.group_ids ?? [];
+        if (groupIds.length >= MAX_GROUPS_PER_USER) {
+          throw new HttpsError(
+            "failed-precondition",
+            `You can be in at most ${MAX_GROUPS_PER_USER} cities`,
+          );
+        }
+
         const groupRef = db().collection("groups").doc(groupId);
         const groupData = {
           group_code: code,
-          group_name,
+          group_name: groupName,
           group_members: [member],
-          daily_goal,
-          goal_reset_time,
-          goal_reset_timezone,
+          owner_uid: uid,
+          member_uids: [uid],
+          daily_goal: dailyGoal,
+          goal_reset_time: goalResetTime,
+          goal_reset_timezone: goalResetTimezone,
           completions_today: [],
           streak: 0,
+          streak_freezes: STARTING_FREEZES,
+          frozen_dates: [],
+          broken_streak: null,
+          last_activity_date: getProcessingDate(goalResetTime, goalResetTimezone),
+          last_inactivity_meteor_date: null,
           current_build: null,
           city_map: EMPTY_CITY,
           last_processed_date: null,
@@ -112,6 +166,15 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
 
         tx.set(codeRef, { group_id: groupId });
         tx.set(groupRef, groupData);
+        tx.set(
+          userRef,
+          {
+            display_name: member,
+            group_ids: FieldValue.arrayUnion(groupId),
+            created_at: userSnap.exists ? userSnap.data()!.created_at ?? FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
       });
 
       // Read back with server timestamp resolved
@@ -131,13 +194,11 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
 // --- joinGroup ---
 
 export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
-  const { group_code, member } = request.data;
+  const uid = requireAuth(request);
+  const rawCode = requireTrimmed(request.data.group_code, "group_code", 6, 6);
+  const member = requireTrimmed(request.data.member, "member", 1, 30);
 
-  if (!group_code || !member) {
-    throw new HttpsError("invalid-argument", "group_code and member are required");
-  }
-
-  const code = group_code.toUpperCase();
+  const code = rawCode.toUpperCase();
   const codeSnap = await db().collection("group_codes").doc(code).get();
 
   if (!codeSnap.exists) {
@@ -146,33 +207,70 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
 
   const groupId = codeSnap.data()!.group_id;
   const groupRef = db().collection("groups").doc(groupId);
+  const userRef = db().collection("users").doc(uid);
 
   let finalData: FirebaseFirestore.DocumentData;
 
   await db().runTransaction(async (tx) => {
-    const groupSnap = await tx.get(groupRef);
+    const [groupSnap, userSnap] = await Promise.all([
+      tx.get(groupRef),
+      tx.get(userRef),
+    ]);
     if (!groupSnap.exists) {
       throw new HttpsError("not-found", "Group not found");
     }
 
     const data = groupSnap.data()!;
     const members: string[] = data.group_members;
+    const memberUids: string[] = data.member_uids ?? [];
 
     // Idempotent — already a member
-    if (members.includes(member)) {
+    if (memberUids.includes(uid)) {
       finalData = data;
       return;
     }
 
-    if (members.length >= 4) {
-      throw new HttpsError("failed-precondition", "Group is full (max 4 members)");
+    if (members.length >= MAX_MEMBERS_PER_GROUP) {
+      throw new HttpsError(
+        "failed-precondition",
+        `Group is full (max ${MAX_MEMBERS_PER_GROUP} members)`,
+      );
+    }
+
+    const groupIds: string[] = userSnap.data()?.group_ids ?? [];
+    if (groupIds.length >= MAX_GROUPS_PER_USER) {
+      throw new HttpsError(
+        "failed-precondition",
+        `You can be in at most ${MAX_GROUPS_PER_USER} cities`,
+      );
+    }
+
+    // Display names are the game-state currency (completions etc.), so
+    // they must be unique within a group — suffix on collision.
+    let name = member;
+    for (let i = 2; members.includes(name); i++) {
+      name = `${member} ${i}`;
     }
 
     tx.update(groupRef, {
-      group_members: [...members, member],
+      group_members: [...members, name],
+      member_uids: [...memberUids, uid],
     });
+    tx.set(
+      userRef,
+      {
+        display_name: member,
+        group_ids: FieldValue.arrayUnion(groupId),
+        created_at: userSnap.exists ? userSnap.data()!.created_at ?? FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
 
-    finalData = { ...data, group_members: [...members, member] };
+    finalData = {
+      ...data,
+      group_members: [...members, name],
+      member_uids: [...memberUids, uid],
+    };
   });
 
   finalData = await maybeProcessDay(groupId, finalData!);
@@ -182,6 +280,7 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
 // --- getGroup ---
 
 export const getGroup = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
   const { group_id } = request.data;
 
   if (!group_id) {
@@ -193,6 +292,9 @@ export const getGroup = onCall({ enforceAppCheck: true }, async (request) => {
     throw new HttpsError("not-found", "Group not found");
   }
 
+  // Membership check (throws failed-precondition for non-members)
+  memberNameForUid(snap.data()!, uid);
+
   const data = await maybeProcessDay(group_id, snap.data()!);
   return groupToResponse(group_id, data);
 });
@@ -200,10 +302,11 @@ export const getGroup = onCall({ enforceAppCheck: true }, async (request) => {
 // --- completeGoal ---
 
 export const completeGoal = onCall({ enforceAppCheck: true }, async (request) => {
-  const { group_id, member } = request.data;
+  const uid = requireAuth(request);
+  const { group_id } = request.data;
 
-  if (!group_id || !member) {
-    throw new HttpsError("invalid-argument", "group_id and member are required");
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
   }
 
   const groupRef = db().collection("groups").doc(group_id);
@@ -216,10 +319,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   }
 
   let data = snap.data()!;
-
-  if (!data.group_members.includes(member)) {
-    throw new HttpsError("failed-precondition", "Not a member of this group");
-  }
+  memberNameForUid(data, uid);
 
   if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
     data = await maybeProcessDay(group_id, data);
@@ -229,7 +329,15 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   await db().runTransaction(async (tx) => {
     const freshSnap = await tx.get(groupRef);
     const freshData = freshSnap.data()!;
+    const member = memberNameForUid(freshData, uid);
     const completions: string[] = freshData.completions_today;
+
+    // The current game-day label in the group's timezone — completing the
+    // goal is "activity" for the 7-day inactivity meteor.
+    const activityDate = getProcessingDate(
+      freshData.goal_reset_time,
+      freshData.goal_reset_timezone ?? "UTC",
+    );
 
     // Idempotent
     if (completions.includes(member)) {
@@ -238,8 +346,15 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     }
 
     const newCompletions = [...completions, member];
-    tx.update(groupRef, { completions_today: newCompletions });
-    finalData = { ...freshData, completions_today: newCompletions };
+    tx.update(groupRef, {
+      completions_today: newCompletions,
+      last_activity_date: activityDate,
+    });
+    finalData = {
+      ...freshData,
+      completions_today: newCompletions,
+      last_activity_date: activityDate,
+    };
   });
 
   return groupToResponse(group_id, finalData!);
@@ -248,10 +363,11 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
 // --- selectBuild ---
 
 export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => {
-  const { group_id, member, type } = request.data;
+  const uid = requireAuth(request);
+  const { group_id, type } = request.data;
 
-  if (!group_id || !member || !type) {
-    throw new HttpsError("invalid-argument", "group_id, member, and type are required");
+  if (!group_id || !type) {
+    throw new HttpsError("invalid-argument", "group_id and type are required");
   }
 
   if (!(type in BUILDING_DAYS)) {
@@ -271,6 +387,7 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
   }
 
   let data = snap.data()!;
+  memberNameForUid(data, uid);
 
   if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
     data = await maybeProcessDay(group_id, data);
@@ -279,13 +396,10 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
   await db().runTransaction(async (tx) => {
     const freshSnap = await tx.get(groupRef);
     const freshData = freshSnap.data()!;
+    memberNameForUid(freshData, uid);
 
     if (freshData.current_build !== null) {
       throw new HttpsError("failed-precondition", "A build is already in progress");
-    }
-
-    if (!freshData.group_members.includes(member)) {
-      throw new HttpsError("failed-precondition", "Not a member of this group");
     }
 
     // Check if city is full
@@ -307,9 +421,111 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
   return groupToResponse(group_id, finalData!);
 });
 
+// --- repairStreak ---
+
+export const repairStreak = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const { group_id } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  let data = snap.data()!;
+  memberNameForUid(data, uid);
+
+  // Settle any pending day first so broken_streak is current
+  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
+    data = await maybeProcessDay(group_id, data);
+  }
+
+  const today = getProcessingDate(
+    data.goal_reset_time,
+    data.goal_reset_timezone ?? "UTC",
+  );
+  const repaired = applyStreakRepair({
+    buildingCompletions: data.building_completions ?? [],
+    frozenDates: data.frozen_dates ?? [],
+    brokenStreak: data.broken_streak ?? null,
+    todayStr: today,
+  });
+
+  if (!repaired) {
+    throw new HttpsError(
+      "failed-precondition",
+      "There's no recently broken streak to repair",
+    );
+  }
+
+  await groupRef.update({
+    frozen_dates: repaired.frozen_dates,
+    streak: repaired.streak,
+    broken_streak: null,
+  });
+
+  const updatedSnap = await groupRef.get();
+  return groupToResponse(group_id, updatedSnap.data()!);
+});
+
+// --- leaveGroup ---
+
+export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const { group_id } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const userRef = db().collection("users").doc(uid);
+
+  await db().runTransaction(async (tx) => {
+    const groupSnap = await tx.get(groupRef);
+    if (!groupSnap.exists) {
+      // Already gone — just clean up the membership pointer.
+      tx.set(userRef, { group_ids: FieldValue.arrayRemove(group_id) }, { merge: true });
+      return;
+    }
+
+    const data = groupSnap.data()!;
+    const name = memberNameForUid(data, uid);
+
+    if (data.owner_uid === uid) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The founder can't leave their city — delete it instead",
+      );
+    }
+
+    const idx = (data.member_uids as string[]).indexOf(uid);
+    const newMembers = (data.group_members as string[]).filter((_, i) => i !== idx);
+    const newUids = (data.member_uids as string[]).filter((_, i) => i !== idx);
+    const newCompletions = (data.completions_today as string[]).filter(
+      (m) => m !== name,
+    );
+
+    tx.update(groupRef, {
+      group_members: newMembers,
+      member_uids: newUids,
+      completions_today: newCompletions,
+    });
+    tx.set(userRef, { group_ids: FieldValue.arrayRemove(group_id) }, { merge: true });
+  });
+
+  return { success: true };
+});
+
 // --- deleteGroup ---
 
 export const deleteGroup = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
   const { group_id } = request.data;
 
   if (!group_id) {
@@ -323,11 +539,56 @@ export const deleteGroup = onCall({ enforceAppCheck: true }, async (request) => 
     throw new HttpsError("not-found", "Group not found");
   }
 
-  const code = snap.data()!.group_code;
+  const data = snap.data()!;
+  // Server-enforced ownership: only the founder can delete a city.
+  if (data.owner_uid !== uid) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only the city's founder can delete it",
+    );
+  }
+
+  const code = data.group_code;
+  const memberUids: string[] = data.member_uids ?? [];
   const batch = db().batch();
   batch.delete(groupRef);
   batch.delete(db().collection("group_codes").doc(code));
+  for (const memberUid of memberUids) {
+    batch.set(
+      db().collection("users").doc(memberUid),
+      { group_ids: FieldValue.arrayRemove(group_id) },
+      { merge: true },
+    );
+  }
   await batch.commit();
 
   return { success: true };
+});
+
+// --- upsertProfile ---
+// Creates/updates the caller's users/{uid} doc. Called after sign-up (and
+// harmlessly after sign-in) so the display name persists across groups and
+// devices. Writes stay server-only; clients read the doc via Firestore rules.
+
+export const upsertProfile = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const displayName = requireTrimmed(request.data.display_name, "display_name", 1, 30);
+
+  const userRef = db().collection("users").doc(uid);
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(userRef);
+    tx.set(
+      userRef,
+      {
+        display_name: displayName,
+        group_ids: snap.data()?.group_ids ?? [],
+        created_at: snap.exists
+          ? snap.data()!.created_at ?? FieldValue.serverTimestamp()
+          : FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  });
+
+  return { display_name: displayName };
 });

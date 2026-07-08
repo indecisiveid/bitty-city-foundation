@@ -6,33 +6,15 @@ import {
   findOccupiedTiles,
   getProcessingDate,
 } from "./gameLogic";
-import { EMPTY_CITY, GRID_ROWS, GRID_COLS } from "./utils";
+import { EMPTY_CITY, GRID_ROWS, GRID_COLS, groupToResponse } from "./utils";
+import { requireDemoAccess } from "./auth";
 
 const db = () => getFirestore();
-
-function groupToResponse(groupId: string, data: FirebaseFirestore.DocumentData) {
-  return {
-    group_id: groupId,
-    group_code: data.group_code,
-    group_name: data.group_name,
-    group_members: data.group_members,
-    daily_goal: data.daily_goal,
-    goal_reset_time: data.goal_reset_time,
-    goal_reset_timezone: data.goal_reset_timezone ?? "UTC",
-    completions_today: data.completions_today,
-    streak: data.streak,
-    current_build: data.current_build ?? null,
-    city_map: data.city_map,
-    last_processed_date: data.last_processed_date ?? null,
-    pending_event: data.pending_event ?? null,
-    building_completions: data.building_completions ?? [],
-    created_at: data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
-  };
-}
 
 // --- demoAsteroid ---
 
 export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) => {
+  requireDemoAccess(request);
   const { group_id } = request.data;
 
   if (!group_id) {
@@ -83,6 +65,7 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
 // --- demoFillCity ---
 
 export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) => {
+  requireDemoAccess(request);
   const { group_id, count } = request.data;
 
   if (!group_id) {
@@ -134,6 +117,7 @@ export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) =>
 // placed row-major, then resets all build/streak/event state.
 
 export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request) => {
+  requireDemoAccess(request);
   const { group_id, count, type = "house" } = request.data;
 
   if (!group_id) {
@@ -189,6 +173,7 @@ export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request
 // Equivalent to demoSetBuildings with count = 0.
 
 export const demoResetCity = onCall({ enforceAppCheck: true }, async (request) => {
+  requireDemoAccess(request);
   const { group_id } = request.data;
 
   if (!group_id) {

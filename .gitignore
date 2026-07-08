@@ -3,6 +3,8 @@ Include/
 Lib/
 Scripts/
 pyvenv.cfg
+.venv/
+venv/
 
 # Python
 __pycache__/
@@ -25,3 +27,11 @@ Thumbs.db
 # Test scripts
 test_db.py
 test_cli.py
+
+# Node / Firebase
+node_modules/
+functions/lib/
+firestore-debug.log
+firebase-debug.log
+ui-debug.log
+.firebase/

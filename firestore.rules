@@ -1,12 +1,22 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Group state is readable only by its members (live onSnapshot reads).
+    // All writes go through the callable functions (Admin SDK bypasses rules).
     match /groups/{groupId} {
-      allow read: if true;
+      allow read: if request.auth != null
+                  && request.auth.uid in resource.data.member_uids;
       allow write: if false;
     }
+    // Invite-code index is server-only.
     match /group_codes/{code} {
       allow read: if false;
+      allow write: if false;
+    }
+    // Each user can read their own profile (display_name + group_ids —
+    // powers cross-device city restore). Writes are server-only.
+    match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
       allow write: if false;
     }
   }
