@@ -1,18 +1,3 @@
-# Virtual environment
-Include/
-Lib/
-Scripts/
-pyvenv.cfg
-.venv/
-venv/
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-
 # IDE
 .vscode/
 .idea/
@@ -23,10 +8,6 @@ Thumbs.db
 
 # Environment variables
 .env
-
-# Test scripts
-test_db.py
-test_cli.py
 
 # Node / Firebase
 node_modules/
