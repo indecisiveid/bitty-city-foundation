@@ -330,6 +330,30 @@ async function main() {
   const devGroupIds = devProfile.body?.fields?.group_ids?.arrayValue?.values ?? [];
   check('delete cleans users/{uid}.group_ids', devGroupIds.length === 0, JSON.stringify(devGroupIds));
 
+  console.log('— account deletion (App Store 5.1.1(v)) —');
+  const zed = await signUp(`zed-${Date.now()}@example.com`, 'password123');
+  const zedCity = await call(
+    'createGroup',
+    { group_name: 'Doomed City', member: 'Zed', daily_goal: 'x' },
+    zed,
+  );
+  const zedGroupId = zedCity.result?.group_id;
+  const zedJoin = await call('joinGroup', { group_code: g.group_code, member: 'Zed' }, zed).catch(() => null);
+  const del = await call('deleteAccount', {}, zed);
+  check('deleteAccount succeeds', del.result?.success === true, JSON.stringify(del));
+  const zedGroupAfter = await readDoc(`groups/${zedGroupId}`, dev);
+  check('founded city deleted with the account', zedGroupAfter.status === 403 || zedGroupAfter.body?.error?.code === 404 || !zedGroupAfter.body?.fields, `status=${zedGroupAfter.status}`);
+  const zedAuth = await fetch(
+    `${AUTH}/identitytoolkit.googleapis.com/v1/accounts:lookup?key=fake-api-key`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken: zed.idToken }),
+    },
+  ).then((r) => r.json());
+  check('auth user deleted', !!zedAuth.error, JSON.stringify(zedAuth).slice(0, 120));
+  void zedJoin;
+
   console.log('— profile upsert —');
   const upsert = await call('upsertProfile', { display_name: '  Chrisso  ' }, dev);
   check('upsertProfile trims + returns', upsert.result?.display_name === 'Chrisso', JSON.stringify(upsert));

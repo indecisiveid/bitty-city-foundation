@@ -12,6 +12,7 @@ export {
   leaveGroup,
   repairStreak,
   upsertProfile,
+  deleteAccount,
 } from "./groupHandlers";
 
 export { demoAsteroid, demoFillCity, demoSetBuildings, demoResetCity } from "./demoHandlers";

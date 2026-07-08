@@ -1,5 +1,6 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getAuth } from "firebase-admin/auth";
 import { v4 as uuidv4 } from "uuid";
 import { DateTime } from "luxon";
 import {
@@ -561,6 +562,56 @@ export const deleteGroup = onCall({ enforceAppCheck: true }, async (request) => 
     );
   }
   await batch.commit();
+
+  return { success: true };
+});
+
+// --- deleteAccount ---
+// App Store guideline 5.1.1(v): apps with account creation must offer
+// in-app account deletion. Removes the caller from every city they're in
+// (cities they founded are deleted for everyone — the app warns first),
+// deletes users/{uid}, then the Auth user itself.
+
+export const deleteAccount = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const userRef = db().collection("users").doc(uid);
+  const userSnap = await userRef.get();
+  const groupIds: string[] = userSnap.data()?.group_ids ?? [];
+
+  for (const groupId of groupIds) {
+    const groupRef = db().collection("groups").doc(groupId);
+    const snap = await groupRef.get();
+    if (!snap.exists) continue;
+    const data = snap.data()!;
+
+    if (data.owner_uid === uid) {
+      // Founder: the city goes with them.
+      const batch = db().batch();
+      batch.delete(groupRef);
+      batch.delete(db().collection("group_codes").doc(data.group_code));
+      for (const memberUid of (data.member_uids as string[]) ?? []) {
+        if (memberUid === uid) continue;
+        batch.set(
+          db().collection("users").doc(memberUid),
+          { group_ids: FieldValue.arrayRemove(groupId) },
+          { merge: true },
+        );
+      }
+      await batch.commit();
+    } else {
+      const idx = ((data.member_uids as string[]) ?? []).indexOf(uid);
+      if (idx === -1) continue;
+      const name = data.group_members[idx];
+      await groupRef.update({
+        group_members: (data.group_members as string[]).filter((_, i) => i !== idx),
+        member_uids: (data.member_uids as string[]).filter((_, i) => i !== idx),
+        completions_today: (data.completions_today as string[]).filter((m) => m !== name),
+      });
+    }
+  }
+
+  await userRef.delete();
+  await getAuth().deleteUser(uid);
 
   return { success: true };
 });
