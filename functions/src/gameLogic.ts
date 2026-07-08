@@ -14,6 +14,25 @@ const DESTROY_WEIGHTS: Record<string, number> = {
   skyscraper: 1,
 };
 
+// --- Streak forgiveness ---
+// Groups hold a small stock of "streak freezes". A missed day that would
+// break a positive streak consumes one freeze per gap day instead. Frozen
+// days bridge the chain but do not increment the count.
+export const FREEZE_CAP = 3;
+export const STARTING_FREEZES = 1;
+// A broken streak can be repaired (gap days retroactively frozen) within
+// this many days of the break.
+export const REPAIR_WINDOW_DAYS = 7;
+
+// --- 7-day inactivity meteor ---
+// If a group logs no goal completions for this many consecutive days, a
+// meteor damages the city on the next day-process — regardless of whether
+// a build is active. Streak freezes do NOT prevent it (forgiveness is for
+// short slips; the meteor punishes abandonment).
+export const INACTIVITY_METEOR_DAYS = 7;
+export const INACTIVITY_DESTROY_FRACTION = 0.2;
+export const INACTIVITY_DESTROY_MAX = 10;
+
 export type CityMap = Record<string, (string | null)[]>;
 
 export interface CurrentBuild {
@@ -25,6 +44,9 @@ export interface CurrentBuild {
 export interface PendingEvent {
   event_id: string;
   type: "build_complete" | "asteroid";
+  // Distinguishes the standard missed-build asteroid from the 7-day
+  // inactivity meteor so the client can frame the moment differently.
+  cause?: "missed_day" | "inactivity";
   // Firestore rejects nested arrays in document writes. Each destroyed
   // tile is therefore stored as an object `{row, col}` rather than a
   // `[row, col]` tuple, even though the latter would be more compact.
@@ -34,16 +56,29 @@ export interface PendingEvent {
   timestamp: string;
 }
 
+export interface BrokenStreak {
+  value: number;
+  broken_on: string; // "YYYY-MM-DD" processing day the break was recorded
+  last_active_date: string; // "YYYY-MM-DD" last day the chain was alive
+}
+
 export interface GroupDoc {
   group_id: string;
   group_code: string;
   group_name: string;
   group_members: string[];
+  owner_uid?: string;
+  member_uids?: string[];
   daily_goal: string;
   goal_reset_time: string;
   goal_reset_timezone?: string;
   completions_today: string[];
   streak: number;
+  streak_freezes?: number;
+  frozen_dates?: string[];
+  broken_streak?: BrokenStreak | null;
+  last_activity_date?: string | null;
+  last_inactivity_meteor_date?: string | null;
   current_build: CurrentBuild | null;
   city_map: CityMap;
   last_processed_date: string | null;
@@ -57,6 +92,10 @@ export interface EndOfDayUpdates {
   city_map?: CityMap;
   current_build?: CurrentBuild | null;
   streak?: number;
+  streak_freezes?: number;
+  frozen_dates?: string[];
+  broken_streak?: BrokenStreak | null;
+  last_inactivity_meteor_date?: string;
   pending_event?: PendingEvent;
   building_completions?: string[];
 }
@@ -73,11 +112,69 @@ function resolveZone(tzName: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// computeStreak — direct TS port of Python `compute_streak`
+// Date-string arithmetic — "YYYY-MM-DD" ↔ days-since-epoch (integer math
+// avoids timezone drift; all game dates are already tz-resolved strings)
+// ---------------------------------------------------------------------------
+
+function parseYmd(s: string): number {
+  const [y, m, d] = s.split("-").map(Number);
+  return Date.UTC(y, m - 1, d) / 86400000;
+}
+
+function formatYmd(dayNum: number): string {
+  return new Date(dayNum * 86400000).toISOString().slice(0, 10);
+}
+
+/** Whole days from `a` to `b` (positive when b is later). */
+export function daysBetween(a: string, b: string): number {
+  return parseYmd(b) - parseYmd(a);
+}
+
+// ---------------------------------------------------------------------------
+// computeStreakWithFreezes
 //
-// Streak = consecutive recent days, ending at today or yesterday, on which
-// a building was placed in the city. Anything older keeps living in the log
-// but doesn't count toward the current run.
+// Streak = number of *successful* days in the consecutive run of "active"
+// days (successful or frozen) ending at today or yesterday. Frozen days
+// bridge gaps without incrementing the count.
+//
+// `completionDates` = days on which the whole group completed its goal
+// (see processEndOfDay — every all-complete day is logged, not just days a
+// building landed, so multi-day builds keep the streak climbing).
+// ---------------------------------------------------------------------------
+
+export function computeStreakWithFreezes(
+  completionDates: string[],
+  frozenDates: string[],
+  todayStr: string,
+): number {
+  if (completionDates.length === 0) return 0;
+
+  const completionSet = new Set(completionDates.map(parseYmd));
+  const active = new Set([
+    ...completionSet,
+    ...frozenDates.map(parseYmd),
+  ]);
+
+  const today = parseYmd(todayStr);
+  const anchor = active.has(today)
+    ? today
+    : active.has(today - 1)
+      ? today - 1
+      : null;
+  if (anchor === null) return 0;
+
+  let streak = 0;
+  let d = anchor;
+  while (active.has(d)) {
+    if (completionSet.has(d)) streak++;
+    d -= 1;
+  }
+  return streak;
+}
+
+// ---------------------------------------------------------------------------
+// computeStreak — historical entry point (no freezes). Kept because the
+// mobile app mirrors this exact function in `mobile/src/utils/streak.ts`.
 //
 // Examples (today = 2026-05-04):
 //   ["2026-05-04"]                          → 1   (today)
@@ -92,35 +189,7 @@ export function computeStreak(
   completionDates: string[],
   todayStr: string,
 ): number {
-  if (completionDates.length === 0) return 0;
-
-  // Parse YYYY-MM-DD → days since epoch for integer arithmetic (avoids tz drift)
-  const parseYmd = (s: string): number => {
-    const [y, m, d] = s.split("-").map(Number);
-    return Date.UTC(y, m - 1, d) / 86400000;
-  };
-
-  const today = parseYmd(todayStr);
-  const yesterday = today - 1;
-
-  // Deduplicate and sort descending
-  const sortedDesc = Array.from(new Set(completionDates))
-    .map(parseYmd)
-    .sort((a, b) => b - a);
-
-  if (sortedDesc[0] !== today && sortedDesc[0] !== yesterday) return 0;
-
-  let streak = 1;
-  let expected = sortedDesc[0] - 1;
-  for (let i = 1; i < sortedDesc.length; i++) {
-    if (sortedDesc[i] === expected) {
-      streak++;
-      expected -= 1;
-    } else {
-      break;
-    }
-  }
-  return streak;
+  return computeStreakWithFreezes(completionDates, [], todayStr);
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +235,32 @@ export function getProcessingDate(
     return resetToday.minus({ days: 1 }).toISODate()!;
   }
   return resetToday.toISODate()!;
+}
+
+// ---------------------------------------------------------------------------
+// isFirstDayGrace — first-day 24h streak grace (spec §4.8)
+//
+// A processed day is unpunishable (no build cancel, no asteroid, no freeze
+// burn) when the reset boundary that ends it comes less than 24h after the
+// group was created — day 1 always gets a full 24 hours regardless of what
+// time of day the city was founded.
+// ---------------------------------------------------------------------------
+
+export function isFirstDayGrace(
+  createdAtIso: string,
+  processingDate: string,
+  goalResetTime: string,
+  goalResetTimezone: string = "UTC",
+): boolean {
+  const tz = resolveZone(goalResetTimezone);
+  const [hour, minute] = goalResetTime.split(":").map(Number);
+  // Day `D` ends at the reset time on D+1 in the group's timezone.
+  const boundary = DateTime.fromISO(processingDate, { zone: tz })
+    .plus({ days: 1 })
+    .set({ hour, minute, second: 0, millisecond: 0 });
+  const created = DateTime.fromISO(createdAtIso);
+  if (!created.isValid || !boundary.isValid) return false;
+  return boundary.diff(created, "hours").hours < 24;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +315,46 @@ function weightedChoice<T>(items: T[], weights: number[]): T {
 }
 
 // ---------------------------------------------------------------------------
-// processEndOfDay — mirrors Python `process_end_of_day`
+// destroyBuildings — pick `count` occupied tiles (weighted: houses likelier
+// than skyscrapers), turn them to rubble. Shared by the missed-day asteroid
+// and the inactivity meteor.
+// ---------------------------------------------------------------------------
+
+function destroyBuildings(
+  cityMap: CityMap,
+  count: number,
+): { map: CityMap; tiles: Array<{ row: number; col: number }> } {
+  const occupied = findOccupiedTiles(cityMap);
+  const remaining = [...occupied];
+  const remainingWeights = remaining.map((t) => DESTROY_WEIGHTS[t.type] || 1);
+  const picked: Array<{ row: number; col: number }> = [];
+
+  const n = Math.min(count, remaining.length);
+  for (let i = 0; i < n; i++) {
+    const pickedIdx = weightedChoice(
+      remaining.map((_, j) => j),
+      remainingWeights,
+    );
+    picked.push({ row: remaining[pickedIdx].row, col: remaining[pickedIdx].col });
+    remaining.splice(pickedIdx, 1);
+    remainingWeights.splice(pickedIdx, 1);
+  }
+
+  const newMap: CityMap = Object.fromEntries(
+    Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
+  );
+  for (const { row, col } of picked) {
+    newMap[row][col] = "rubble";
+  }
+  return { map: newMap, tiles: picked };
+}
+
+function makeEventId(): string {
+  return `evt_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
+}
+
+// ---------------------------------------------------------------------------
+// processEndOfDay
 //
 // Pure function: returns a dict of fields to update on the group document.
 // Does NOT modify inputs.
@@ -229,6 +363,23 @@ function weightedChoice<T>(items: T[], weights: number[]): T {
 // the day that just ended in the group's local timezone. Passed in from the
 // caller so that `last_processed_date` and `building_completions` entries
 // are guaranteed to use the same day boundary.
+//
+// Semantics (2026-07-08):
+// - Every day on which ALL members completed the goal is logged in
+//   `building_completions`, whether the active build landed or merely
+//   advanced — so the streak keeps climbing through multi-day builds.
+//   (Before this change only landing days were logged, which dropped the
+//   visible streak to 0 mid-apartment/skyscraper and would have made streak
+//   freezes auto-burn during every multi-day build.)
+// - Missed gap days that would break a positive streak consume freezes
+//   (one per day) and are recorded in `frozen_dates`. When freezes run out
+//   the break is recorded in `broken_streak` for the repair callable.
+// - `lastActivityDate` ≥ INACTIVITY_METEOR_DAYS ago fires the inactivity
+//   meteor regardless of `current_build`, at most once per
+//   INACTIVITY_METEOR_DAYS (lazy processing may batch many absent days
+//   into a single pass).
+// - `isGraceDay` (first-day 24h grace) suppresses every punishment; positive
+//   progress still counts.
 // ---------------------------------------------------------------------------
 
 export function processEndOfDay(params: {
@@ -239,6 +390,12 @@ export function processEndOfDay(params: {
   streak: number; // legacy param — recomputed below; kept for caller compat
   buildingCompletions: string[];
   processingDate: string;
+  lastActivityDate?: string | null;
+  streakFreezes?: number;
+  frozenDates?: string[];
+  brokenStreak?: BrokenStreak | null;
+  lastInactivityMeteorDate?: string | null;
+  isGraceDay?: boolean;
 }): EndOfDayUpdates {
   const {
     groupMembers,
@@ -247,6 +404,12 @@ export function processEndOfDay(params: {
     cityMap,
     buildingCompletions,
     processingDate,
+    lastActivityDate = null,
+    streakFreezes = 0,
+    frozenDates = [],
+    brokenStreak = null,
+    lastInactivityMeteorDate = null,
+    isGraceDay = false,
   } = params;
 
   const updates: EndOfDayUpdates = {
@@ -255,119 +418,228 @@ export function processEndOfDay(params: {
 
   const nowIso = new Date().toISOString();
 
-  // Streak depends on the current building_completions log regardless of
-  // whether a build was active. Compute once at the bottom.
   const newCompletions = [...buildingCompletions];
-
-  // No active build — just clear completions + recompute streak in case
-  // time passed and the run expired.
-  if (currentBuild === null) {
-    updates.building_completions = newCompletions;
-    updates.streak = computeStreak(newCompletions, processingDate);
-    return updates;
-  }
+  const newFrozen = [...frozenDates];
+  let freezes = streakFreezes;
+  let broken: BrokenStreak | null = brokenStreak;
 
   const membersSet = new Set(groupMembers);
   const completionsSet = new Set(completionsToday);
-  const allCompleted = [...membersSet].every((m) => completionsSet.has(m));
+  const daySuccessful =
+    groupMembers.length > 0 &&
+    completionsToday.length > 0 &&
+    [...membersSet].every((m) => completionsSet.has(m));
 
-  if (allCompleted) {
-    const newDays = currentBuild.days_completed + 1;
+  // Inactivity meteor decision — made up front because it supersedes the
+  // standard missed-day asteroid when both would fire in the same pass.
+  const idleDays =
+    lastActivityDate !== null ? daysBetween(lastActivityDate, processingDate) : null;
+  const meteorDue =
+    !isGraceDay &&
+    !daySuccessful &&
+    idleDays !== null &&
+    idleDays >= INACTIVITY_METEOR_DAYS &&
+    (lastInactivityMeteorDate === null ||
+      daysBetween(lastInactivityMeteorDate, processingDate) >= INACTIVITY_METEOR_DAYS);
 
-    if (newDays >= currentBuild.days_required) {
-      // Building complete — place on random empty/rubble tile
-      const empty = findEmptyTiles(cityMap);
-      const newMap: CityMap = Object.fromEntries(
-        Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
-      );
+  // --- Build progression / standard asteroid ---
+  if (currentBuild !== null) {
+    if (daySuccessful) {
+      const newDays = currentBuild.days_completed + 1;
 
-      if (empty.length > 0) {
-        const tileIdx = Math.floor(Math.random() * empty.length);
-        const tile = empty[tileIdx];
-        newMap[tile[0]][tile[1]] = currentBuild.type;
-        updates.city_map = newMap;
-        updates.pending_event = {
-          event_id: `evt_${uuidv4().replace(/-/g, "").slice(0, 12)}`,
-          type: "build_complete",
-          building: currentBuild.type,
-          tile: tile,
-          timestamp: nowIso,
-        };
-        // Log the landing date — de-dupe for idempotency safety
-        if (!newCompletions.includes(processingDate)) {
-          newCompletions.push(processingDate);
-        }
-      }
-
-      updates.current_build = null;
-    } else {
-      // Build advances; building_completions log is unchanged this day
-      updates.current_build = {
-        ...currentBuild,
-        days_completed: newDays,
-      };
-    }
-  } else {
-    // Failed — asteroid
-    updates.current_build = null;
-
-    const occupied = findOccupiedTiles(cityMap);
-    if (occupied.length > 0) {
-      let maxDestroy = Math.min(3, occupied.length - 1);
-      if (maxDestroy < 1) {
-        maxDestroy = occupied.length > 1 ? 1 : 0;
-      }
-
-      if (maxDestroy > 0) {
-        const nDestroy = Math.floor(Math.random() * maxDestroy) + 1;
-        const actualDestroy = Math.min(nDestroy, occupied.length - 1);
-
-        if (actualDestroy > 0) {
-          const remaining = [...occupied];
-          const remainingWeights = remaining.map(
-            (t) => DESTROY_WEIGHTS[t.type] || 1,
-          );
-          const destroyedOriginalIndices: number[] = [];
-
-          for (let i = 0; i < actualDestroy; i++) {
-            if (remaining.length === 0) break;
-            const pickedIdx = weightedChoice(
-              remaining.map((_, j) => j),
-              remainingWeights,
-            );
-            // Find original index in occupied array
-            destroyedOriginalIndices.push(
-              occupied.indexOf(remaining[pickedIdx]),
-            );
-            remaining.splice(pickedIdx, 1);
-            remainingWeights.splice(pickedIdx, 1);
-          }
-
+      if (newDays >= currentBuild.days_required) {
+        // Building complete — place on random empty/rubble tile
+        const empty = findEmptyTiles(cityMap);
+        if (empty.length > 0) {
           const newMap: CityMap = Object.fromEntries(
             Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
           );
-          const tilesDestroyed: Array<{ row: number; col: number }> = [];
-          for (const idx of destroyedOriginalIndices) {
-            const { row, col } = occupied[idx];
-            newMap[row][col] = "rubble";
-            tilesDestroyed.push({ row, col });
-          }
-
+          const tile = empty[Math.floor(Math.random() * empty.length)];
+          newMap[tile[0]][tile[1]] = currentBuild.type;
           updates.city_map = newMap;
           updates.pending_event = {
-            event_id: `evt_${uuidv4().replace(/-/g, "").slice(0, 12)}`,
-            type: "asteroid",
-            tiles_destroyed: tilesDestroyed,
+            event_id: makeEventId(),
+            type: "build_complete",
+            building: currentBuild.type,
+            tile: tile,
             timestamp: nowIso,
           };
+          // A landing earns a streak freeze (capped)
+          freezes = Math.min(FREEZE_CAP, freezes + 1);
+        }
+        updates.current_build = null;
+      } else {
+        // Build advances
+        updates.current_build = {
+          ...currentBuild,
+          days_completed: newDays,
+        };
+      }
+    } else if (isGraceDay) {
+      // First-day grace: keep the build, no asteroid.
+    } else if (meteorDue) {
+      // The inactivity meteor (below) supersedes the standard asteroid,
+      // but a failed build still cancels.
+      updates.current_build = null;
+    } else {
+      // Failed — standard missed-day asteroid
+      updates.current_build = null;
+
+      const occupied = findOccupiedTiles(cityMap);
+      if (occupied.length > 0) {
+        let maxDestroy = Math.min(3, occupied.length - 1);
+        if (maxDestroy < 1) {
+          maxDestroy = occupied.length > 1 ? 1 : 0;
+        }
+
+        if (maxDestroy > 0) {
+          const nDestroy = Math.floor(Math.random() * maxDestroy) + 1;
+          const actualDestroy = Math.min(nDestroy, occupied.length - 1);
+
+          if (actualDestroy > 0) {
+            const { map, tiles } = destroyBuildings(cityMap, actualDestroy);
+            updates.city_map = map;
+            updates.pending_event = {
+              event_id: makeEventId(),
+              type: "asteroid",
+              cause: "missed_day",
+              tiles_destroyed: tiles,
+              timestamp: nowIso,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  // --- Log the successful day (landing or not) ---
+  if (daySuccessful && !newCompletions.includes(processingDate)) {
+    newCompletions.push(processingDate);
+  }
+
+  // --- Inactivity meteor ---
+  if (meteorDue) {
+    const mapNow = updates.city_map ?? cityMap;
+    const occupied = findOccupiedTiles(mapNow);
+    if (occupied.length > 0) {
+      const nDestroy = Math.min(
+        INACTIVITY_DESTROY_MAX,
+        Math.max(1, Math.ceil(occupied.length * INACTIVITY_DESTROY_FRACTION)),
+      );
+      const { map, tiles } = destroyBuildings(mapNow, nDestroy);
+      updates.city_map = map;
+      updates.pending_event = {
+        event_id: makeEventId(),
+        type: "asteroid",
+        cause: "inactivity",
+        tiles_destroyed: tiles,
+        timestamp: nowIso,
+      };
+    }
+    // Stamp even when there was nothing to destroy so an idle-but-empty
+    // group doesn't get re-checked (and instantly meteored) every pass.
+    updates.last_inactivity_meteor_date = processingDate;
+  }
+
+  // --- Streak freeze consumption / break recording ---
+  // Gap = days between the last active (successful or frozen) day and the
+  // processed day. Lazy processing can batch several absent days into one
+  // pass, so the whole gap is settled here: freeze it all or break.
+  if (!isGraceDay) {
+    const activeDayNums = [
+      ...new Set([...newCompletions, ...newFrozen].map(parseYmd)),
+    ];
+    const pDay = parseYmd(processingDate);
+    const before = activeDayNums.filter((d) => d < pDay);
+    if (before.length > 0) {
+      const lastActive = Math.max(...before);
+      const gapLen = pDay - 1 - lastActive; // days lastActive+1 .. pDay-1
+      if (gapLen > 0) {
+        const preStreak = computeStreakWithFreezes(
+          newCompletions,
+          newFrozen,
+          formatYmd(lastActive),
+        );
+        if (preStreak > 0) {
+          if (freezes >= gapLen) {
+            for (let d = lastActive + 1; d <= pDay - 1; d++) {
+              const ds = formatYmd(d);
+              if (!newFrozen.includes(ds)) newFrozen.push(ds);
+            }
+            freezes -= gapLen;
+          } else {
+            // Not enough freezes — the streak breaks, but keep a repairable
+            // record. Don't burn a partial stock that can't save the chain.
+            // The chain factually died the first day the yesterday-anchor
+            // failed (lastActive + 2), which may be well before this pass
+            // when lazy processing batches a long absence — only record
+            // breaks still inside the repair window.
+            const brokenOnDay = lastActive + 2;
+            if (pDay - brokenOnDay <= REPAIR_WINDOW_DAYS) {
+              broken = {
+                value: preStreak,
+                broken_on: formatYmd(brokenOnDay),
+                last_active_date: formatYmd(lastActive),
+              };
+            }
+          }
         }
       }
     }
   }
 
   // Single source of truth for streak: derive from the (possibly
-  // appended-to) completions log relative to the day we just processed.
+  // appended-to) completions log + frozen bridge days, relative to the day
+  // we just processed.
   updates.building_completions = newCompletions;
-  updates.streak = computeStreak(newCompletions, processingDate);
+  updates.streak_freezes = freezes;
+  updates.frozen_dates = newFrozen;
+  updates.broken_streak = broken;
+  updates.streak = computeStreakWithFreezes(
+    newCompletions,
+    newFrozen,
+    processingDate,
+  );
   return updates;
+}
+
+// ---------------------------------------------------------------------------
+// applyStreakRepair — one-tap repair of a recently broken streak
+//
+// Retroactively freezes the gap days from the break's `last_active_date`
+// through yesterday (relative to `todayStr`, the current day in the group's
+// timezone), reconnecting the old chain. Free, one shot per break — the
+// record is cleared on use. Returns null when there is nothing repairable
+// (no record, or the break is older than REPAIR_WINDOW_DAYS).
+// ---------------------------------------------------------------------------
+
+export function applyStreakRepair(params: {
+  buildingCompletions: string[];
+  frozenDates: string[];
+  brokenStreak: BrokenStreak | null;
+  todayStr: string;
+}): {
+  frozen_dates: string[];
+  streak: number;
+  broken_streak: null;
+} | null {
+  const { buildingCompletions, frozenDates, brokenStreak, todayStr } = params;
+  if (!brokenStreak) return null;
+  if (daysBetween(brokenStreak.broken_on, todayStr) > REPAIR_WINDOW_DAYS) {
+    return null;
+  }
+
+  const lastActive = parseYmd(brokenStreak.last_active_date);
+  const today = parseYmd(todayStr);
+  const frozen = [...frozenDates];
+  for (let d = lastActive + 1; d <= today - 1; d++) {
+    const ds = formatYmd(d);
+    if (!frozen.includes(ds)) frozen.push(ds);
+  }
+
+  return {
+    frozen_dates: frozen,
+    streak: computeStreakWithFreezes(buildingCompletions, frozen, todayStr),
+    broken_streak: null,
+  };
 }
