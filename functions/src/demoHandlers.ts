@@ -54,6 +54,15 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
     streak: data.streak,
     buildingCompletions: data.building_completions ?? [],
     processingDate,
+    // Pass the forgiveness fields through so a demo strike doesn't zero
+    // the group's freeze stock (found in the 2026-07-08 simulator E2E).
+    streakFreezes: data.streak_freezes ?? 0,
+    frozenDates: data.frozen_dates ?? [],
+    brokenStreak: data.broken_streak ?? null,
+    lastActivityDate: data.last_activity_date ?? null,
+    lastInactivityMeteorDate: data.last_inactivity_meteor_date ?? null,
+    // Deliberately no grace day: the whole point of the dev tool is to
+    // force a strike on demand.
   });
 
   await groupRef.update({ ...updates });
