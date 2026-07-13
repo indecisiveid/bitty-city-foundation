@@ -5,7 +5,7 @@ import { defineString } from "firebase-functions/params";
 // any environment (they stay deployed in prod but are dev-gated, spec §4.3).
 // Override via functions config: DEMO_ALLOWLIST env/param.
 export const demoAllowlist = defineString("DEMO_ALLOWLIST", {
-  default: "iosif.christian@sidejawn.io,ccrimi75@gmail.com",
+  default: "iosif.christian@sidejawn.io,iosif.christian@gmail.com,ccrimi75@gmail.com",
 });
 
 /**
