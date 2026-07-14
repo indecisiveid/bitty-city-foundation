@@ -404,6 +404,43 @@ describe("processEndOfDay — standard missed-day asteroid", () => {
   });
 });
 
+describe("processEndOfDay — tile build dates", () => {
+  it("records the build date on the tile where a building lands", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        currentBuild: { type: "house", days_required: 1, days_completed: 0 },
+        cityMap: emptyMap(),
+        tileBuildDates: {},
+      }),
+    );
+    const tile = updates.pending_event?.tile;
+    expect(tile).toBeDefined();
+    expect(updates.tile_build_dates?.[`${tile![0]},${tile![1]}`]).toBe(TODAY);
+  });
+
+  it("clears the date of a tile destroyed by an asteroid, keeps survivors", () => {
+    const cityMap = mapWithHouses(5);
+    const seeded: Record<string, string> = {};
+    for (const { row, col } of findOccupiedTiles(cityMap)) seeded[`${row},${col}`] = "2026-01-01";
+    const updates = processEndOfDay(
+      baseParams({
+        currentBuild: { type: "house", days_required: 1, days_completed: 0 },
+        cityMap,
+        tileBuildDates: seeded,
+      }),
+    );
+    const destroyed = updates.pending_event?.tiles_destroyed ?? [];
+    expect(destroyed.length).toBeGreaterThanOrEqual(1);
+    for (const { row, col } of destroyed) {
+      expect(updates.tile_build_dates?.[`${row},${col}`]).toBeUndefined();
+    }
+    for (const { row, col } of findOccupiedTiles(updates.city_map!)) {
+      expect(updates.tile_build_dates?.[`${row},${col}`]).toBe("2026-01-01");
+    }
+  });
+});
+
 describe("processEndOfDay — 7-day inactivity meteor", () => {
   it("fires after 7 idle days even with no active build", () => {
     const updates = processEndOfDay(

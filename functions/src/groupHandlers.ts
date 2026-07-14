@@ -87,6 +87,7 @@ async function maybeProcessDay(
     isGraceDay: createdIso
       ? isFirstDayGrace(createdIso, processingDate, data.goal_reset_time, goalResetTimezone)
       : false,
+    tileBuildDates: data.tile_build_dates ?? {},
   });
 
   const writeUpdates: Record<string, unknown> = {
@@ -162,6 +163,7 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           last_processed_date: null,
           pending_event: null,
           building_completions: [],
+          tile_build_dates: {},
           created_at: FieldValue.serverTimestamp(),
         };
 

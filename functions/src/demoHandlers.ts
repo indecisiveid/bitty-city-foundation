@@ -61,6 +61,7 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
     brokenStreak: data.broken_streak ?? null,
     lastActivityDate: data.last_activity_date ?? null,
     lastInactivityMeteorDate: data.last_inactivity_meteor_date ?? null,
+    tileBuildDates: data.tile_build_dates ?? {},
     // Deliberately no grace day: the whole point of the dev tool is to
     // force a strike on demand.
   });
@@ -110,11 +111,14 @@ export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) =>
   const newMap = Object.fromEntries(
     Object.entries(cityMap).map(([k, row]) => [k, [...(row as (string | null)[])]]),
   );
+  const buildDates: Record<string, string> = { ...(data.tile_build_dates ?? {}) };
+  const today = new Date().toISOString().slice(0, 10);
   for (const [r, c] of tilesToFill) {
     newMap[r][c] = buildingTypes[Math.floor(Math.random() * buildingTypes.length)];
+    buildDates[`${r},${c}`] = today;
   }
 
-  await groupRef.update({ city_map: newMap });
+  await groupRef.update({ city_map: newMap, tile_build_dates: buildDates });
 
   const updatedSnap = await groupRef.get();
   return groupToResponse(group_id, updatedSnap.data()!);
@@ -156,11 +160,19 @@ export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request
     Object.entries(EMPTY_CITY).map(([k, row]) => [k, [...row]]),
   );
 
+  // Stagger the build dates (most-recent first placed) so tapping different
+  // houses shows different "built on" dates — handy for exercising the
+  // tap-to-inspect popup.
+  const today = new Date();
+  const buildDates: Record<string, string> = {};
   let placed = 0;
   outer: for (let r = 0; r < GRID_ROWS; r++) {
     for (let c = 0; c < GRID_COLS; c++) {
       if (placed >= clampedCount) break outer;
       newMap[String(r)][c] = type;
+      const d = new Date(today);
+      d.setUTCDate(d.getUTCDate() - placed);
+      buildDates[`${r},${c}`] = d.toISOString().slice(0, 10);
       placed++;
     }
   }
@@ -172,6 +184,7 @@ export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request
     completions_today: [],
     streak: 0,
     building_completions: [],
+    tile_build_dates: buildDates,
   });
 
   const updatedSnap = await groupRef.get();
@@ -207,6 +220,7 @@ export const demoResetCity = onCall({ enforceAppCheck: true }, async (request) =
     completions_today: [],
     streak: 0,
     building_completions: [],
+    tile_build_dates: {},
   });
 
   const updatedSnap = await groupRef.get();

@@ -84,6 +84,11 @@ export interface GroupDoc {
   last_processed_date: string | null;
   pending_event: PendingEvent | null;
   building_completions: string[];
+  // Per-tile build date: key "row,col" → "YYYY-MM-DD" the building on that
+  // tile last landed. Set when a building lands, cleared when destroyed, so
+  // it stays correct through asteroids. Flat object (no nested arrays) to
+  // satisfy Firestore.
+  tile_build_dates?: Record<string, string>;
   created_at: FirebaseFirestore.Timestamp;
 }
 
@@ -98,6 +103,7 @@ export interface EndOfDayUpdates {
   last_inactivity_meteor_date?: string;
   pending_event?: PendingEvent;
   building_completions?: string[];
+  tile_build_dates?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +402,7 @@ export function processEndOfDay(params: {
   brokenStreak?: BrokenStreak | null;
   lastInactivityMeteorDate?: string | null;
   isGraceDay?: boolean;
+  tileBuildDates?: Record<string, string>;
 }): EndOfDayUpdates {
   const {
     groupMembers,
@@ -410,6 +417,7 @@ export function processEndOfDay(params: {
     brokenStreak = null,
     lastInactivityMeteorDate = null,
     isGraceDay = false,
+    tileBuildDates = {},
   } = params;
 
   const updates: EndOfDayUpdates = {
@@ -420,6 +428,10 @@ export function processEndOfDay(params: {
 
   const newCompletions = [...buildingCompletions];
   const newFrozen = [...frozenDates];
+  // Per-tile build dates — mutated as buildings land / get destroyed, and
+  // flushed to `updates` at the end only if it changed.
+  const newBuildDates: Record<string, string> = { ...tileBuildDates };
+  let buildDatesChanged = false;
   let freezes = streakFreezes;
   let broken: BrokenStreak | null = brokenStreak;
 
@@ -457,6 +469,8 @@ export function processEndOfDay(params: {
           const tile = empty[Math.floor(Math.random() * empty.length)];
           newMap[tile[0]][tile[1]] = currentBuild.type;
           updates.city_map = newMap;
+          newBuildDates[`${tile[0]},${tile[1]}`] = processingDate;
+          buildDatesChanged = true;
           updates.pending_event = {
             event_id: makeEventId(),
             type: "build_complete",
@@ -499,6 +513,10 @@ export function processEndOfDay(params: {
           if (actualDestroy > 0) {
             const { map, tiles } = destroyBuildings(cityMap, actualDestroy);
             updates.city_map = map;
+            for (const t of tiles) {
+              delete newBuildDates[`${t.row},${t.col}`];
+              buildDatesChanged = true;
+            }
             updates.pending_event = {
               event_id: makeEventId(),
               type: "asteroid",
@@ -528,6 +546,10 @@ export function processEndOfDay(params: {
       );
       const { map, tiles } = destroyBuildings(mapNow, nDestroy);
       updates.city_map = map;
+      for (const t of tiles) {
+        delete newBuildDates[`${t.row},${t.col}`];
+        buildDatesChanged = true;
+      }
       updates.pending_event = {
         event_id: makeEventId(),
         type: "asteroid",
@@ -600,6 +622,9 @@ export function processEndOfDay(params: {
     newFrozen,
     processingDate,
   );
+  if (buildDatesChanged) {
+    updates.tile_build_dates = newBuildDates;
+  }
   return updates;
 }
 
