@@ -17,6 +17,6 @@ export {
 
 export { demoAsteroid, demoFillCity, demoSetBuildings, demoResetCity } from "./demoHandlers";
 
-export { registerPushToken, unregisterPushToken } from "./notificationHandlers";
+export { registerPushToken, unregisterPushToken, sendTestPush } from "./notificationHandlers";
 
 export { dailyNudge } from "./scheduled";

@@ -7,6 +7,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { requireAuth } from "./auth";
 import { isValidPushToken } from "./push";
+import { notifyUids } from "./notify";
 
 const db = () => getFirestore();
 
@@ -26,6 +27,21 @@ export const registerPushToken = onCall({ enforceAppCheck: true }, async (reques
     .doc(uid)
     .set({ push_tokens: FieldValue.arrayUnion(token) }, { merge: true });
 
+  return { success: true };
+});
+
+/**
+ * Send a test push to the caller's own device(s). Self-only (uses the caller's
+ * uid), so it's harmless — you can only notify yourself. Handy for verifying
+ * the end-to-end pipeline (token → FCM → APNs → device) from a dev button.
+ */
+export const sendTestPush = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  await notifyUids([uid], {
+    title: "Bitty City",
+    body: "🎉 Test notification — push is working!",
+    data: { test: "true" },
+  });
   return { success: true };
 });
 
