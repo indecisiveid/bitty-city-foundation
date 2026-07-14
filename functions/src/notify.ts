@@ -12,7 +12,7 @@
  * triggered it.
  */
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { sendPush, PushPayload, isExpoPushToken } from "./push";
+import { sendPush, PushPayload, isValidPushToken } from "./push";
 
 const db = () => getFirestore();
 
@@ -43,7 +43,7 @@ async function tokensForUids(uids: string[]): Promise<Map<string, string>> {
     if (!snap.exists) continue;
     const tokens: string[] = snap.data()?.push_tokens ?? [];
     for (const t of tokens) {
-      if (isExpoPushToken(t)) tokenToUid.set(t, snap.id);
+      if (isValidPushToken(t)) tokenToUid.set(t, snap.id);
     }
   }
   return tokenToUid;

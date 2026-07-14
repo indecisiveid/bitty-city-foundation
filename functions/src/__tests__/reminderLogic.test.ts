@@ -8,7 +8,7 @@ import {
   NudgeInput,
 } from "../reminderLogic";
 import { INACTIVITY_METEOR_DAYS } from "../gameLogic";
-import { isExpoPushToken } from "../push";
+import { isValidPushToken } from "../push";
 
 const base: NudgeInput = {
   localHour: reminderHour(0), // reset at midnight → nudge 3h before
@@ -73,13 +73,13 @@ describe("decideNudge", () => {
   });
 });
 
-describe("isExpoPushToken", () => {
-  it("accepts Expo token shapes and rejects junk", () => {
-    expect(isExpoPushToken("ExponentPushToken[abc123]")).toBe(true);
-    expect(isExpoPushToken("ExpoPushToken[abc123]")).toBe(true);
-    expect(isExpoPushToken("not-a-token")).toBe(false);
-    expect(isExpoPushToken("")).toBe(false);
-    expect(isExpoPushToken(null)).toBe(false);
-    expect(isExpoPushToken(42)).toBe(false);
+describe("isValidPushToken", () => {
+  it("accepts non-empty string FCM tokens and rejects junk", () => {
+    expect(isValidPushToken("fMEP0v...:APA91bH...")).toBe(true);
+    expect(isValidPushToken("abc123")).toBe(true);
+    expect(isValidPushToken("")).toBe(false);
+    expect(isValidPushToken(null)).toBe(false);
+    expect(isValidPushToken(42)).toBe(false);
+    expect(isValidPushToken("x".repeat(5000))).toBe(false);
   });
 });
