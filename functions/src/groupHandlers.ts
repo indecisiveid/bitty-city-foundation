@@ -23,8 +23,15 @@ import {
   MAX_GROUPS_PER_USER,
 } from "./utils";
 import { requireAuth } from "./auth";
+import { notifyMembers, notifyAllMembers } from "./notify";
 
 const db = () => getFirestore();
+
+const BUILDING_LABEL: Record<string, string> = {
+  house: "House",
+  apartment: "Apartment",
+  skyscraper: "Skyscraper",
+};
 
 /**
  * Resolve the caller's display name inside a group. Membership is
@@ -97,7 +104,21 @@ async function maybeProcessDay(
 
   await db().collection("groups").doc(groupId).update(writeUpdates);
 
-  return { ...data, ...writeUpdates };
+  const merged = { ...data, ...writeUpdates };
+
+  // "City grew" push: a build landed during this end-of-day pass. Whichever
+  // caller triggered processing sends it; last_processed_date has advanced so
+  // it won't re-fire. Best-effort — notify never throws.
+  const event = writeUpdates.pending_event as { type?: string; building?: string } | undefined;
+  if (event?.type === "build_complete") {
+    const label = BUILDING_LABEL[event.building ?? ""] ?? "building";
+    await notifyAllMembers(groupId, merged, {
+      title: `🏙️ ${merged.group_name ?? "Your city"} grew!`,
+      body: `Your crew finished a ${label}. Come see it in the city.`,
+    });
+  }
+
+  return merged;
 }
 
 // --- createGroup ---
@@ -328,6 +349,10 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     data = await maybeProcessDay(group_id, data);
   }
 
+  // Set only when THIS call is the one that records a new completion (not the
+  // idempotent re-tap), so we notify teammates exactly once.
+  let completedName: string | null = null;
+
   // Now mark completion in a transaction
   await db().runTransaction(async (tx) => {
     const freshSnap = await tx.get(groupRef);
@@ -344,11 +369,13 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
 
     // Idempotent
     if (completions.includes(member)) {
+      completedName = null;
       finalData = freshData;
       return;
     }
 
     const newCompletions = [...completions, member];
+    completedName = member;
     tx.update(groupRef, {
       completions_today: newCompletions,
       last_activity_date: activityDate,
@@ -359,6 +386,21 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       last_activity_date: activityDate,
     };
   });
+
+  // "Teammate completed" push → nudge the crew members who still haven't
+  // finished today (the pressure's on them). Best-effort, after the write.
+  if (completedName) {
+    const done: string[] = finalData!.completions_today ?? [];
+    const stillPending: string[] = (finalData!.group_members ?? []).filter(
+      (m: string) => !done.includes(m),
+    );
+    if (stillPending.length > 0) {
+      await notifyMembers(group_id, finalData!, stillPending, {
+        title: finalData!.group_name ?? "Bitty City",
+        body: `${completedName} completed today's goal. Your turn!`,
+      });
+    }
+  }
 
   return groupToResponse(group_id, finalData!);
 });
