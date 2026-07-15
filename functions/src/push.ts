@@ -75,9 +75,24 @@ export async function sendPush(
         notification: { title: payload.title, body: payload.body },
         data,
         apns: {
-          payload: { aps: { sound: "default" } },
+          payload: {
+            aps: {
+              // Explicit alert so APNs always renders a visible banner — a bare
+              // `aps` with only `sound` can produce a silent (no-alert) push
+              // that FCM still reports as "success".
+              alert: { title: payload.title, body: payload.body },
+              sound: "default",
+            },
+          },
         },
       });
+
+      if (res.failureCount > 0) {
+        console.log("[push] sent", {
+          success: res.successCount,
+          failure: res.failureCount,
+        });
+      }
 
       res.responses.forEach((r, i) => {
         if (r.success) return;
