@@ -90,7 +90,11 @@ if [ -f scripts/emulator-smoke.mjs ]; then
   if command -v timeout >/dev/null 2>&1;  then TIMEOUT="timeout 600"
   elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT="gtimeout 600"
   else TIMEOUT=""; fi
-  if PATH="/opt/homebrew/opt/openjdk/bin:$PATH" $TIMEOUT node scripts/emulator-smoke.mjs >/tmp/bc-smoke.log 2>&1; then
+  # emulators:exec boots auth/functions/firestore, runs the smoke, tears down.
+  # (The smoke script itself assumes emulators are already listening.)
+  if PATH="/opt/homebrew/opt/openjdk/bin:$PATH" $TIMEOUT npx firebase emulators:exec \
+       --only auth,functions,firestore --project "$PROJECT" \
+       "node scripts/emulator-smoke.mjs" >/tmp/bc-smoke.log 2>&1; then
     echo "  smoke: $(grep -oE '[0-9]+ (checks?|passed)' /tmp/bc-smoke.log | tail -1 || echo 'passed')"
   else
     tail -15 /tmp/bc-smoke.log
