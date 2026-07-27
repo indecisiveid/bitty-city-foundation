@@ -24,7 +24,7 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
-import { BUILDING_LABEL, buildProgressOf } from "./buildings";
+import { BUILDING_LABEL, buildProgressOf, withArticle } from "./buildings";
 
 const db = () => getFirestore();
 
@@ -109,7 +109,7 @@ async function maybeProcessDay(
     const label = BUILDING_LABEL[event.building ?? ""] ?? "building";
     await notifyAllMembers(groupId, merged, {
       title: `🏙️ ${merged.group_name ?? "Your city"} grew!`,
-      body: `Your crew finished a ${label}. Come see it in the city.`,
+      body: `Your crew finished ${withArticle(label)}. Come see it in the city.`,
     });
   }
 
@@ -509,8 +509,8 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
       group_id,
       finalData!,
       {
-        title: `🏗️ Next up: a ${label}`,
-        body: `${pickerName} picked a ${label} for ${finalData!.group_name ?? "your city"}. ${span}`,
+        title: `🏗️ Next up: ${withArticle(label)}`,
+        body: `${pickerName} picked ${withArticle(label)} for ${finalData!.group_name ?? "your city"}. ${span}`,
       },
       pickerName,
     );

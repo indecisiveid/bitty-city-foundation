@@ -12,7 +12,7 @@ import {
 } from "../reminderLogic";
 import { INACTIVITY_METEOR_DAYS } from "../gameLogic";
 import { isValidPushToken } from "../push";
-import { buildProgressOf } from "../buildings";
+import { buildProgressOf, withArticle, BUILDING_LABEL } from "../buildings";
 import { messageFor } from "../scheduled";
 import { dayCompleteMessage } from "../groupHandlers";
 
@@ -144,6 +144,25 @@ describe("decideNudge", () => {
   });
 });
 
+describe("withArticle", () => {
+  it("picks the article by leading vowel", () => {
+    expect(withArticle("House")).toBe("a House");
+    expect(withArticle("Apartment")).toBe("an Apartment");
+    expect(withArticle("Skyscraper")).toBe("a Skyscraper");
+    expect(withArticle("building")).toBe("a building");
+  });
+
+  it("reads correctly for every building label we ship", () => {
+    for (const label of Object.values(BUILDING_LABEL)) {
+      const phrase = withArticle(label);
+      expect(phrase).toMatch(/^an? \w/);
+      // "a Apartment" is the bug this guards against.
+      if (/^[aeiou]/i.test(label)) expect(phrase.startsWith("an ")).toBe(true);
+      else expect(phrase.startsWith("a ")).toBe(true);
+    }
+  });
+});
+
 describe("buildProgressOf", () => {
   it("is null with no build, or a single-day build", () => {
     expect(buildProgressOf(null)).toBeNull();
@@ -209,9 +228,26 @@ describe("messageFor", () => {
     expect(m.body).toContain("4-day streak");
   });
 
-  it("has a distinct last-call voice", () => {
-    const m = messageFor({ kind: "reminder", recipients: "incomplete", slot: "lastCall" }, ctx);
-    expect(m.title).toContain("Last call");
+  it("has a distinct last-call voice, streak or not", () => {
+    const plain = messageFor({ kind: "reminder", recipients: "incomplete", slot: "lastCall" }, ctx);
+    expect(plain.title).toContain("Last call");
+    const streak = messageFor({ kind: "streak", recipients: "incomplete", slot: "lastCall" }, ctx);
+    expect(streak.title).toContain("Last call");
+    expect(streak.body).toContain("4-day streak");
+  });
+
+  it("never sends the same text twice in one day", () => {
+    // Four identical pushes reads like a broken loop. Every slot the crew can
+    // receive in a single day must say something different.
+    const slots: SlotId[] = ["morning", "midday", "evening", "lastCall"];
+    for (const kind of ["streak", "reminder"] as const) {
+      for (const b of [null, build]) {
+        const bodies = slots.map(
+          (slot) => messageFor({ kind, recipients: "incomplete", slot }, { ...ctx, build: b }).body,
+        );
+        expect(new Set(bodies).size).toBe(slots.length);
+      }
+    }
   });
 
   it("always produces a non-empty title and body", () => {

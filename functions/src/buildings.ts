@@ -11,6 +11,14 @@ export const BUILDING_LABEL: Record<string, string> = {
   skyscraper: "Skyscraper",
 };
 
+/**
+ * "a House" / "an Apartment". The labels are a closed, hand-written set, so a
+ * leading-vowel test is enough — no need for a real article library.
+ */
+export function withArticle(label: string): string {
+  return `${/^[aeiou]/i.test(label) ? "an" : "a"} ${label}`;
+}
+
 /** The active build's progress, when it's a multi-day one worth narrating. */
 export interface BuildProgress {
   label: string;

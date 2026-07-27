@@ -43,33 +43,50 @@ export function messageFor(nudge: Nudge, ctx: MessageContext) {
     };
   }
 
-  // The morning slot sets up the day. On a multi-day build, say where we are.
-  if (nudge.slot === "morning" && ctx.build) {
-    const { dayNumber, daysRequired, label } = ctx.build;
-    return {
-      title: `🌅 Day ${dayNumber} of ${daysRequired}`,
-      body: `Today is Day ${dayNumber} of ${daysRequired}. Plan to complete your goal today to finish building your ${label}.`,
-    };
-  }
+  // Every slot gets its own voice. Four pushes a day that all read "keep the
+  // streak alive" feels like a broken loop, so the day escalates instead:
+  // plan it → nudge → still open → last call. A test pins that no two slots
+  // in the same day can produce the same body.
+  const { cityName, streak, build } = ctx;
+  const onStreak = nudge.kind === "streak";
+  // The goal is always the thing to do; the streak is what's at stake. Keeping
+  // them in separate clauses avoids copy like "finish your 4-day streak".
+  const stake = (clause: string) => (onStreak ? ` ${clause}` : "");
 
-  if (nudge.kind === "streak") {
-    return {
-      title: "🔥 Keep the streak alive",
-      body: `Your ${ctx.streak}-day streak in ${ctx.cityName} is on the line. Finish today's goal!`,
-    };
-  }
+  switch (nudge.slot) {
+    case "morning":
+      // The morning slot sets up the day. On a multi-day build, say where we are.
+      if (build) {
+        const { dayNumber, daysRequired, label } = build;
+        return {
+          title: `🌅 Day ${dayNumber} of ${daysRequired}`,
+          body: `Today is Day ${dayNumber} of ${daysRequired}. Plan to complete your goal today to finish building your ${label}.`,
+        };
+      }
+      return {
+        title: "🌅 Good morning",
+        body: `Plan when you'll finish today's goal in ${cityName}.${stake(`Your ${streak}-day streak depends on it.`)}`,
+      };
 
-  if (nudge.slot === "lastCall") {
-    return {
-      title: "⏳ Last call",
-      body: `Today's goal in ${ctx.cityName} is still open. Don't let the day close on it.`,
-    };
-  }
+    case "midday":
+      return {
+        title: onStreak ? "🔥 Keep the streak alive" : "Bitty City",
+        body: `Don't forget today's goal in ${cityName}.${stake(`Your ${streak}-day streak is on the line.`)}`,
+      };
 
-  return {
-    title: "Bitty City",
-    body: `Don't forget today's goal in ${ctx.cityName}.`,
-  };
+    case "evening":
+      return {
+        title: onStreak ? "🔥 Streak still open" : "Bitty City",
+        body: `Today's goal in ${cityName} still isn't checked off.${stake(`Your ${streak}-day streak is riding on it.`)}`,
+      };
+
+    case "lastCall":
+    default:
+      return {
+        title: "⏳ Last call",
+        body: `The day's nearly done and today's goal in ${cityName} is still open.${stake(`Last chance to save your ${streak}-day streak.`)}`,
+      };
+  }
 }
 
 async function runNudges(): Promise<void> {
