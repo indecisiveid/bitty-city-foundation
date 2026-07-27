@@ -65,7 +65,7 @@ step "Building + testing"
 npm --prefix functions run build >/dev/null 2>&1 || fail "tsc build failed — run: npm --prefix functions run build"
 echo "  build: ok"
 TEST_OUT=$(npm --prefix functions test 2>&1) || { echo "$TEST_OUT" | tail -20; fail "unit tests failed"; }
-echo "  tests: $(echo "$TEST_OUT" | grep -oE '[0-9]+ passed' | head -1)"
+echo "  tests: $(echo "$TEST_OUT" | grep -oE 'Tests:.*[0-9]+ passed' | grep -oE '[0-9]+ passed' | head -1 || echo 'passed')"
 
 # ── Gate 4: live-app contract (the one that protects real users) ──────
 step "Checking backward compatibility with shipped apps"
@@ -86,7 +86,11 @@ PY
 # ── Gate 5: emulator smoke (real end-to-end behaviour) ────────────────
 step "Emulator smoke test"
 if [ -f scripts/emulator-smoke.mjs ]; then
-  if PATH="/opt/homebrew/opt/openjdk/bin:$PATH" timeout 600 node scripts/emulator-smoke.mjs >/tmp/bc-smoke.log 2>&1; then
+  # `timeout` is GNU coreutils — absent on stock macOS, present on CI runners.
+  if command -v timeout >/dev/null 2>&1;  then TIMEOUT="timeout 600"
+  elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT="gtimeout 600"
+  else TIMEOUT=""; fi
+  if PATH="/opt/homebrew/opt/openjdk/bin:$PATH" $TIMEOUT node scripts/emulator-smoke.mjs >/tmp/bc-smoke.log 2>&1; then
     echo "  smoke: $(grep -oE '[0-9]+ (checks?|passed)' /tmp/bc-smoke.log | tail -1 || echo 'passed')"
   else
     tail -15 /tmp/bc-smoke.log
