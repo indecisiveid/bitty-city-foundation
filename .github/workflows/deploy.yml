@@ -60,6 +60,10 @@ jobs:
       - name: Install firebase-tools
         run: npm install -g firebase-tools@15.17.0
 
+      # functions/.env is gitignored; the emulators expect it to exist.
+      - name: Seed functions env
+        run: cp functions/.env.example functions/.env
+
       - name: Write deploy credentials
         if: ${{ github.event_name != 'pull_request' }}
         env:

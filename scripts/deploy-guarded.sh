@@ -97,7 +97,9 @@ if [ -f scripts/emulator-smoke.mjs ]; then
        "node scripts/emulator-smoke.mjs" >/tmp/bc-smoke.log 2>&1; then
     echo "  smoke: $(grep -oE '[0-9]+ (checks?|passed)' /tmp/bc-smoke.log | tail -1 || echo 'passed')"
   else
-    tail -15 /tmp/bc-smoke.log
+    echo "  ── smoke output ─────────────────────────────"
+    tail -60 /tmp/bc-smoke.log | sed 's/^/  /'
+    echo "  ─────────────────────────────────────────────"
     fail "emulator smoke failed (full log: /tmp/bc-smoke.log)"
   fi
 else
