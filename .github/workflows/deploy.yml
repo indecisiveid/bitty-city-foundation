@@ -53,6 +53,12 @@ jobs:
       - name: Install dependencies
         run: npm --prefix functions ci
 
+      # firebase-tools isn't a repo dependency; the runner needs it for the
+      # emulator smoke gate and the deploy itself. Pinned to the version the
+      # gates were validated against locally.
+      - name: Install firebase-tools
+        run: npm install -g firebase-tools@15.17.0
+
       - name: Write deploy credentials
         if: ${{ github.event_name != 'pull_request' }}
         env:
