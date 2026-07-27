@@ -189,6 +189,25 @@ async function main() {
   const eveComplete = await call('completeGoal', { group_id: g.group_id }, eve);
   check('non-member completeGoal rejected', eveComplete.error === 'FAILED_PRECONDITION', JSON.stringify(eveComplete));
 
+  console.log('— kudos —');
+  const kudosSelf = await call('sendKudos', { group_id: g.group_id, to_member: 'Christian' }, dev);
+  check('self kudos rejected', kudosSelf.error === 'FAILED_PRECONDITION', JSON.stringify(kudosSelf));
+  const kudosGhost = await call('sendKudos', { group_id: g.group_id, to_member: 'Nobody' }, dev);
+  check('kudos to a non-member rejected', kudosGhost.error === 'NOT_FOUND', JSON.stringify(kudosGhost));
+  const kudosByOutsider = await call('sendKudos', { group_id: g.group_id, to_member: 'Christian' }, eve);
+  check('kudos from a non-member rejected', kudosByOutsider.error === 'FAILED_PRECONDITION', JSON.stringify(kudosByOutsider));
+  const kudos1 = await call('sendKudos', { group_id: g.group_id, to_member: 'Christian 2' }, dev);
+  check('sendKudos succeeds', kudos1.result?.is_new === true, JSON.stringify(kudos1).slice(0, 200));
+  check(
+    'kudos pair recorded',
+    JSON.stringify(kudos1.result?.kudos_today?.pairs) ===
+      JSON.stringify([{ from: 'Christian', to: 'Christian 2' }]),
+    JSON.stringify(kudos1.result?.kudos_today),
+  );
+  const kudos2 = await call('sendKudos', { group_id: g.group_id, to_member: 'Christian 2' }, dev);
+  check('repeat kudos is a silent no-op', kudos2.result?.is_new === false, JSON.stringify(kudos2));
+  check('repeat kudos does not duplicate the pair', kudos2.result?.kudos_today?.pairs?.length === 1);
+
   console.log('— build select —');
   const build = await call('selectBuild', { group_id: g.group_id, type: 'house' }, bob);
   check('selectBuild by member', build.result?.current_build?.type === 'house');

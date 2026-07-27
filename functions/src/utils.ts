@@ -87,6 +87,7 @@ export function groupToResponse(
     last_processed_date: data.last_processed_date ?? null,
     pending_event: data.pending_event ?? null,
     building_completions: data.building_completions ?? [],
+    kudos_today: data.kudos_today ?? null,
     created_at:
       data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
   };

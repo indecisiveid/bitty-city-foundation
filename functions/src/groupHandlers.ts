@@ -34,7 +34,7 @@ const db = () => getFirestore();
  * `group_members`); the name remains the currency of the game state
  * (completions_today etc.) so the UI stays name-driven.
  */
-function memberNameForUid(
+export function memberNameForUid(
   data: FirebaseFirestore.DocumentData,
   uid: string,
 ): string {
@@ -95,6 +95,10 @@ async function maybeProcessDay(
   const writeUpdates: Record<string, unknown> = {
     ...updates,
     last_processed_date: processingDate,
+    // Kudos are a today-only thing: the day rolled over, so yesterday's
+    // hearts go with `completions_today`. (`kudos.ts` also date-stamps the
+    // bucket, which covers the window before lazy processing runs.)
+    kudos_today: null,
   };
 
   await db().collection("groups").doc(groupId).update(writeUpdates);
