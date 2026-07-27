@@ -24,14 +24,9 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
+import { BUILDING_LABEL, buildProgressOf } from "./buildings";
 
 const db = () => getFirestore();
-
-const BUILDING_LABEL: Record<string, string> = {
-  house: "House",
-  apartment: "Apartment",
-  skyscraper: "Skyscraper",
-};
 
 /**
  * Resolve the caller's display name inside a group. Membership is
@@ -325,6 +320,37 @@ export const getGroup = onCall({ enforceAppCheck: true }, async (request) => {
 
 // --- completeGoal ---
 
+/**
+ * Copy for "everyone finished today". Three flavours, because the moment
+ * means different things depending on where the build is:
+ *   - final day of a multi-day build → the building is done, enjoy it
+ *   - mid multi-day build            → day banked, next commitment day incoming
+ *   - single-day build or no build   → plain crew congratulations
+ */
+export function dayCompleteMessage(data: FirebaseFirestore.DocumentData) {
+  const cityName = data.group_name ?? "your city";
+  const build = buildProgressOf(data.current_build);
+
+  if (build) {
+    const { dayNumber, daysRequired, label } = build;
+    if (dayNumber >= daysRequired) {
+      return {
+        title: "🎉 Everyone's in — build complete!",
+        body: `That's all ${daysRequired} days. Your ${label} is finished — enjoy the new addition to ${cityName}.`,
+      };
+    }
+    return {
+      title: "🎉 Everyone's in!",
+      body: `Day ${dayNumber} of ${daysRequired} banked toward your ${label}. Next commitment day is tomorrow — keep it going.`,
+    };
+  }
+
+  return {
+    title: "🎉 Everyone's in!",
+    body: `The whole crew completed today's goal in ${cityName}. Next commitment day is tomorrow.`,
+  };
+}
+
 export const completeGoal = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
   const { group_id } = request.data;
@@ -399,6 +425,11 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
         title: finalData!.group_name ?? "Bitty City",
         body: `${completedName} completed today's goal. Your turn!`,
       });
+    } else {
+      // That was the last one — the whole crew is in. Celebrate the day and
+      // point at what's next. The build itself lands at day processing, which
+      // sends its own "city grew" push then.
+      await notifyAllMembers(group_id, finalData!, dayCompleteMessage(finalData!));
     }
   }
 
@@ -438,10 +469,14 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
     data = await maybeProcessDay(group_id, data);
   }
 
+  // Who picked, so the rest of the crew can be told. Set inside the
+  // transaction so a losing racer (build already in progress) never notifies.
+  let pickerName: string | null = null;
+
   await db().runTransaction(async (tx) => {
     const freshSnap = await tx.get(groupRef);
     const freshData = freshSnap.data()!;
-    memberNameForUid(freshData, uid);
+    const member = memberNameForUid(freshData, uid);
 
     if (freshData.current_build !== null) {
       throw new HttpsError("failed-precondition", "A build is already in progress");
@@ -461,7 +496,25 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
 
     tx.update(groupRef, { current_build: newBuild });
     finalData = { ...freshData, current_build: newBuild };
+    pickerName = member;
   });
+
+  // "Someone picked the next build" push → tell the rest of the crew what
+  // they're working toward. Best-effort, after the write.
+  if (pickerName) {
+    const label = BUILDING_LABEL[type] ?? "building";
+    const days: number = BUILDING_DAYS[type];
+    const span = days === 1 ? "Today's goal builds it." : `It takes ${days} days of everyone completing their goal.`;
+    await notifyAllMembers(
+      group_id,
+      finalData!,
+      {
+        title: `🏗️ Next up: a ${label}`,
+        body: `${pickerName} picked a ${label} for ${finalData!.group_name ?? "your city"}. ${span}`,
+      },
+      pickerName,
+    );
+  }
 
   return groupToResponse(group_id, finalData!);
 });

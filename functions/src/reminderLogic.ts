@@ -1,11 +1,25 @@
 /**
- * PURE decision logic for the once-a-day nudge. No Firestore, no clock, no
+ * PURE decision logic for the daily goal nudges. No Firestore, no clock, no
  * push — just "given this group's state at this local moment, should we nudge,
  * whom, and how urgently?". Kept pure so it's jest-testable like gameLogic.
  *
- * The scheduler runs hourly; exactly one run per group per day lands on the
- * group's reminder hour (a few hours before its reset), so we fire at most one
- * nudge per game-day. The message escalates by urgency:
+ * The crew gets up to FOUR nudges per game-day, at fixed local times:
+ *
+ *   08:00  morning   → plan the day ("Today is Day 2 of 3…" on a multi-day build)
+ *   11:30  midday
+ *   17:30  evening
+ *   21:00  lastCall
+ *
+ * The scheduler runs every 30 minutes and each slot claims a 30-minute window
+ * starting at its time, so a tick lands in at most one slot and scheduler
+ * jitter (a run at :02 instead of :00) still fires. Slots whose window already
+ * passed are never back-filled — so a build started at 3pm simply gets the
+ * 17:30 and 21:00 nudges, not the two it slept through.
+ *
+ * Each slot is sent at most once per game-day (`remindersSentSlots`, scoped to
+ * `remindersSentDate`), and nobody is nudged once their crew is done.
+ *
+ * The message escalates by urgency:
  *
  *   meteor   → the 7-day inactivity meteor is one idle day away  → warn ALL
  *   streak   → a live streak is on the line and the day isn't done → nudge the
@@ -14,20 +28,30 @@
  */
 import { INACTIVITY_METEOR_DAYS } from "./gameLogic";
 
-/** How many hours before the daily reset the nudge fires. */
-export const REMIND_LEAD_HOURS = 3;
+export type SlotId = "morning" | "midday" | "evening" | "lastCall";
+
+/** How long after its start time a slot still counts as "now" (scheduler jitter). */
+export const SLOT_WINDOW_MINUTES = 30;
+
+/** The four daily nudge times, as minutes since local midnight. */
+export const REMINDER_SLOTS: ReadonlyArray<{ id: SlotId; minutes: number }> = [
+  { id: "morning", minutes: 8 * 60 }, // 08:00
+  { id: "midday", minutes: 11 * 60 + 30 }, // 11:30
+  { id: "evening", minutes: 17 * 60 + 30 }, // 17:30
+  { id: "lastCall", minutes: 21 * 60 }, // 21:00
+];
 
 export type NudgeKind = "meteor" | "streak" | "reminder";
 
 export interface NudgeInput {
-  /** Current hour (0–23) in the group's timezone. */
-  localHour: number;
-  /** The group's reset hour (0–23), parsed from goal_reset_time "HH:MM". */
-  resetHour: number;
+  /** Minutes since midnight (0–1439) in the group's timezone. */
+  localMinutes: number;
   /** The current game-day label (getProcessingDate) in the group's tz. */
   todayGameDate: string;
-  /** Group's stored last_reminder_date, or null if never nudged. */
-  lastReminderDate: string | null;
+  /** The game-date the stored slot list belongs to, or null if never nudged. */
+  remindersSentDate: string | null;
+  /** Slot ids already sent for `remindersSentDate`. */
+  remindersSentSlots: SlotId[];
   memberCount: number;
   completedCount: number;
   /** Current streak length. */
@@ -40,24 +64,38 @@ export interface Nudge {
   kind: NudgeKind;
   /** 'all' for the meteor warning, 'incomplete' otherwise. */
   recipients: "all" | "incomplete";
-}
-
-/** The local hour, 0–23, at which a group with this reset hour gets nudged. */
-export function reminderHour(resetHour: number): number {
-  return ((resetHour - REMIND_LEAD_HOURS) % 24 + 24) % 24;
+  /** Which of the four daily slots this nudge is filling. */
+  slot: SlotId;
 }
 
 /**
- * Decide whether to nudge this group on this hourly tick. Returns null when
- * it's not this group's reminder hour, it's already been nudged today, or the
- * whole crew is already done.
+ * Which slot (if any) the given local time falls inside. A slot owns the
+ * SLOT_WINDOW_MINUTES starting at its time; outside every window this is null.
+ */
+export function slotForLocalMinutes(localMinutes: number): SlotId | null {
+  const slot = REMINDER_SLOTS.find(
+    (s) =>
+      localMinutes >= s.minutes && localMinutes < s.minutes + SLOT_WINDOW_MINUTES,
+  );
+  return slot?.id ?? null;
+}
+
+/**
+ * Decide whether to nudge this group on this tick. Returns null when the tick
+ * isn't inside a slot window, that slot already went out today, or the whole
+ * crew is already done.
  */
 export function decideNudge(input: NudgeInput): Nudge | null {
-  // Only the one hourly tick that matches this group's reminder hour fires.
-  if (input.localHour !== reminderHour(input.resetHour)) return null;
+  const slot = slotForLocalMinutes(input.localMinutes);
+  if (!slot) return null;
 
-  // At most one nudge per game-day.
-  if (input.lastReminderDate === input.todayGameDate) return null;
+  // At most one send per slot per game-day. A stored list from an older
+  // game-date is stale and means nothing has gone out today yet.
+  const sentToday =
+    input.remindersSentDate === input.todayGameDate
+      ? input.remindersSentSlots
+      : [];
+  if (sentToday.includes(slot)) return null;
 
   // No members, or everyone's already done → nothing to nudge about.
   if (input.memberCount === 0) return null;
@@ -68,9 +106,9 @@ export function decideNudge(input: NudgeInput): Nudge | null {
   // and today still isn't a success (nobody's completed yet counts as idle).
   const meteorImminent =
     input.idleDays !== null && input.idleDays >= INACTIVITY_METEOR_DAYS - 1;
-  if (meteorImminent) return { kind: "meteor", recipients: "all" };
+  if (meteorImminent) return { kind: "meteor", recipients: "all", slot };
 
-  if (input.streak > 0) return { kind: "streak", recipients: "incomplete" };
+  if (input.streak > 0) return { kind: "streak", recipients: "incomplete", slot };
 
-  return { kind: "reminder", recipients: "incomplete" };
+  return { kind: "reminder", recipients: "incomplete", slot };
 }
