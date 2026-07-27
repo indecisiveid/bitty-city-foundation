@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Callables that App Store builds already in users' hands depend on.",
+    "Removing or renaming any of these breaks the live app for anyone who",
+    "hasn't updated — an outage no rollback of the *app* can fix, because",
+    "old binaries stay on devices forever.",
+    "",
+    "deploy-guarded.sh FAILS the deploy if any name here disappears from",
+    "functions/src/index.ts. Adding new callables is always safe.",
+    "",
+    "When a release stops supporting an old callable, remove it here FIRST,",
+    "in a commit that explains which app versions are being dropped."
+  ],
+  "minimum_supported_app_version": "1.0.0",
+  "required_callables": [
+    "createGroup",
+    "joinGroup",
+    "getGroup",
+    "completeGoal",
+    "selectBuild",
+    "deleteGroup",
+    "leaveGroup",
+    "repairStreak",
+    "upsertProfile",
+    "deleteAccount",
+    "registerPushToken",
+    "unregisterPushToken",
+    "sendTestPush",
+    "demoAsteroid",
+    "demoFillCity",
+    "demoSetBuildings",
+    "demoResetCity",
+    "dailyNudge"
+  ]
+}
