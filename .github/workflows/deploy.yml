@@ -1,0 +1,102 @@
+name: Backend
+
+# Keeps production in sync with main, without depending on anyone's laptop.
+# PRs run every gate but deploy nothing; pushes to main that touch backend
+# files run the same gates and then deploy.
+#
+# Gates live in scripts/deploy-guarded.sh — one source of truth, so a local
+# `./scripts/deploy-guarded.sh --check` behaves exactly like CI.
+
+on:
+  pull_request:
+    paths:
+      - "functions/**"
+      - "firestore.rules"
+      - "firestore.indexes.json"
+      - "storage.rules"
+      - "firebase.json"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+  push:
+    branches: [main]
+    paths:
+      - "functions/**"
+      - "firestore.rules"
+      - "firestore.indexes.json"
+      - "storage.rules"
+      - "firebase.json"
+  workflow_dispatch:
+
+concurrency:
+  group: backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      # Firestore/Auth emulators are JVM-based; the smoke test needs them.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: npm --prefix functions ci
+
+      - name: Write deploy credentials
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          SA_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA_KEY" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT secret is not set — cannot deploy."
+            exit 1
+          fi
+          mkdir -p "$HOME/.config/firebase"
+          printf '%s' "$SA_KEY" > "$HOME/.config/firebase/bitty-city-deployer.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/firebase/bitty-city-deployer.json" >> "$GITHUB_ENV"
+
+      # PRs: prove the change is safe. No credentials, nothing deployed.
+      - name: Verify (gates only)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          npm --prefix functions run build
+          npm --prefix functions test
+          python3 - <<'PY'
+          import json, re, sys
+          contract = json.load(open("scripts/live-app-contract.json"))
+          src = open("functions/src/index.ts").read()
+          exported = set(re.findall(r"[\w]+", " ".join(re.findall(r"export\s*\{([^}]*)\}", src))))
+          missing = [c for c in contract["required_callables"] if c not in exported]
+          if missing:
+              print("::error::live-app contract broken — missing: %s" % ", ".join(missing))
+              sys.exit(1)
+          print("live-app contract: all %d callables present" % len(contract["required_callables"]))
+          PY
+
+      # main: same gates, then ship.
+      - name: Deploy to production
+        if: ${{ github.event_name != 'pull_request' }}
+        run: ./scripts/deploy-guarded.sh --force
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### Backend"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "Gates run on PR — nothing deployed."
+            else
+              echo "Deployed \`${GITHUB_SHA:0:8}\` to \`bitty-city\` (or blocked by a gate — see log)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
