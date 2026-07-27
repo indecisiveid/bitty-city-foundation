@@ -110,6 +110,18 @@ if [ "$MODE" = "--check" ]; then
   echo ""; echo "✓ All gates passed. (--check: nothing deployed)"; exit 0
 fi
 
+# Production deploys run in CI. Locally, firebase-tools prefers a cached
+# `firebase login` over GOOGLE_APPLICATION_CREDENTIALS — and that cached token
+# expires, so a local deploy dies halfway with a confusing auth error.
+if [ "${CI:-}" != "true" ] && [ "$MODE" != "--local-deploy" ]; then
+  echo ""
+  echo "✓ All gates passed."
+  echo "  Deploys run in CI: push to main and .github/workflows/deploy.yml ships it."
+  echo "  (Override with --local-deploy; needs \`firebase logout\` first so the"
+  echo "   service account isn't shadowed by an expired user login.)"
+  exit 0
+fi
+
 # ── Deploy ────────────────────────────────────────────────────────────
 # Infrastructure is declarative: anything configured in firebase.json ships.
 TARGETS="functions,firestore:rules,firestore:indexes"
@@ -117,7 +129,7 @@ grep -q '"storage"' firebase.json && TARGETS="$TARGETS,storage"
 
 step "Deploying to $PROJECT ($TARGETS)"
 if ! npx firebase deploy --only "$TARGETS" --project "$PROJECT" --non-interactive --force < /dev/null; then
-  fail "firebase deploy failed — prod may be partially updated; check the output above"
+  fail "firebase deploy failed — some targets may have applied; check the output above"
 fi
 
 # ── Post-deploy health check ──────────────────────────────────────────
