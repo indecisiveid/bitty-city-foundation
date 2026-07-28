@@ -11,6 +11,7 @@ export {
   deleteGroup,
   leaveGroup,
   repairStreak,
+  rescueBuild,
   upsertProfile,
   deleteAccount,
 } from "./groupHandlers";

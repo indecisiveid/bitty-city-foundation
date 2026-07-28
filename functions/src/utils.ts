@@ -83,6 +83,7 @@ export function groupToResponse(
     broken_streak: data.broken_streak ?? null,
     last_activity_date: data.last_activity_date ?? null,
     current_build: data.current_build ?? null,
+    abandoned_build: data.abandoned_build ?? null,
     city_map: data.city_map,
     last_processed_date: data.last_processed_date ?? null,
     pending_event: data.pending_event ?? null,

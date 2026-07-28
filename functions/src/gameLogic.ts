@@ -24,11 +24,21 @@ export const STARTING_FREEZES = 1;
 // this many days of the break.
 export const REPAIR_WINDOW_DAYS = 7;
 
+// --- Build rescue ---
+// Missing a day of a multi-day build does NOT damage the city (see the
+// meteor note below — falling rocks are reserved for real abandonment).
+// The build simply stops: it is lifted off the board into
+// `abandoned_build`, and the crew gets one day to spend a streak freeze
+// and pick it back up exactly where it stalled. Miss that window (or hold
+// no freezes) and the build is gone for good — they choose a new one.
+export const BUILD_RESCUE_WINDOW_DAYS = 1;
+
 // --- 7-day inactivity meteor ---
 // If a group logs no goal completions for this many consecutive days, a
 // meteor damages the city on the next day-process — regardless of whether
 // a build is active. Streak freezes do NOT prevent it (forgiveness is for
-// short slips; the meteor punishes abandonment).
+// short slips; the meteor punishes abandonment). This is the ONLY thing
+// that destroys standing buildings.
 export const INACTIVITY_METEOR_DAYS = 7;
 export const INACTIVITY_DESTROY_FRACTION = 0.2;
 export const INACTIVITY_DESTROY_MAX = 10;
@@ -56,6 +66,16 @@ export interface PendingEvent {
   timestamp: string;
 }
 
+// A multi-day build that stalled on a missed day. Held for exactly
+// BUILD_RESCUE_WINDOW_DAYS so the crew can spend a freeze to resume it
+// with its progress intact (`applyBuildRescue`).
+export interface AbandonedBuild {
+  type: string;
+  days_required: number;
+  days_completed: number;
+  abandoned_on: string; // "YYYY-MM-DD" the missed day that stopped the build
+}
+
 export interface BrokenStreak {
   value: number;
   broken_on: string; // "YYYY-MM-DD" processing day the break was recorded
@@ -80,6 +100,7 @@ export interface GroupDoc {
   last_activity_date?: string | null;
   last_inactivity_meteor_date?: string | null;
   current_build: CurrentBuild | null;
+  abandoned_build?: AbandonedBuild | null;
   city_map: CityMap;
   last_processed_date: string | null;
   pending_event: PendingEvent | null;
@@ -96,6 +117,7 @@ export interface EndOfDayUpdates {
   completions_today: string[];
   city_map?: CityMap;
   current_build?: CurrentBuild | null;
+  abandoned_build?: AbandonedBuild | null;
   streak?: number;
   streak_freezes?: number;
   frozen_dates?: string[];
@@ -380,10 +402,13 @@ function makeEventId(): string {
 // - Missed gap days that would break a positive streak consume freezes
 //   (one per day) and are recorded in `frozen_dates`. When freezes run out
 //   the break is recorded in `broken_streak` for the repair callable.
+// - Missing a day of an active build stops the build but does NOT damage
+//   the city (2026-07-28): it moves to `abandoned_build` and can be resumed
+//   with a streak freeze on the following day via `applyBuildRescue`.
 // - `lastActivityDate` ≥ INACTIVITY_METEOR_DAYS ago fires the inactivity
 //   meteor regardless of `current_build`, at most once per
 //   INACTIVITY_METEOR_DAYS (lazy processing may batch many absent days
-//   into a single pass).
+//   into a single pass). This is the only path that destroys buildings.
 // - `isGraceDay` (first-day 24h grace) suppresses every punishment; positive
 //   progress still counts.
 // ---------------------------------------------------------------------------
@@ -392,6 +417,7 @@ export function processEndOfDay(params: {
   groupMembers: string[];
   completionsToday: string[];
   currentBuild: CurrentBuild | null;
+  abandonedBuild?: AbandonedBuild | null;
   cityMap: CityMap;
   streak: number; // legacy param — recomputed below; kept for caller compat
   buildingCompletions: string[];
@@ -408,6 +434,7 @@ export function processEndOfDay(params: {
     groupMembers,
     completionsToday,
     currentBuild,
+    abandonedBuild = null,
     cityMap,
     buildingCompletions,
     processingDate,
@@ -490,44 +517,32 @@ export function processEndOfDay(params: {
         };
       }
     } else if (isGraceDay) {
-      // First-day grace: keep the build, no asteroid.
+      // First-day grace: keep the build, no punishment.
     } else if (meteorDue) {
-      // The inactivity meteor (below) supersedes the standard asteroid,
-      // but a failed build still cancels.
+      // ≥7 idle days is abandonment, not a slip: the build is simply gone
+      // and the meteor (below) does the talking. No rescue offer.
       updates.current_build = null;
     } else {
-      // Failed — standard missed-day asteroid
+      // Missed a day of the build. The city is NOT damaged — the build is
+      // lifted into `abandoned_build`, rescuable with a freeze for one day.
       updates.current_build = null;
-
-      const occupied = findOccupiedTiles(cityMap);
-      if (occupied.length > 0) {
-        let maxDestroy = Math.min(3, occupied.length - 1);
-        if (maxDestroy < 1) {
-          maxDestroy = occupied.length > 1 ? 1 : 0;
-        }
-
-        if (maxDestroy > 0) {
-          const nDestroy = Math.floor(Math.random() * maxDestroy) + 1;
-          const actualDestroy = Math.min(nDestroy, occupied.length - 1);
-
-          if (actualDestroy > 0) {
-            const { map, tiles } = destroyBuildings(cityMap, actualDestroy);
-            updates.city_map = map;
-            for (const t of tiles) {
-              delete newBuildDates[`${t.row},${t.col}`];
-              buildDatesChanged = true;
-            }
-            updates.pending_event = {
-              event_id: makeEventId(),
-              type: "asteroid",
-              cause: "missed_day",
-              tiles_destroyed: tiles,
-              timestamp: nowIso,
-            };
-          }
-        }
-      }
+      updates.abandoned_build = {
+        type: currentBuild.type,
+        days_required: currentBuild.days_required,
+        days_completed: currentBuild.days_completed,
+        abandoned_on: processingDate,
+      };
     }
+  }
+
+  // An older rescue offer has outlived its window (it was only good for the
+  // single day after `abandoned_on`, and we are now settling a later day).
+  if (
+    updates.abandoned_build === undefined &&
+    abandonedBuild &&
+    abandonedBuild.abandoned_on !== processingDate
+  ) {
+    updates.abandoned_build = null;
   }
 
   // --- Log the successful day (landing or not) ---
@@ -626,6 +641,61 @@ export function processEndOfDay(params: {
     updates.tile_build_dates = newBuildDates;
   }
   return updates;
+}
+
+// ---------------------------------------------------------------------------
+// isRescuableBuild — is this stalled build still resumable today?
+//
+// The offer stands only on the day right after the missed day, and only
+// while no other build has been started. Mirrored client-side in
+// `mobile/src/utils/streak.ts` (parity-tested) so the app can show the
+// prompt without a round-trip. Freeze stock is checked separately: the
+// prompt still appears at zero freezes, it just says the build is lost.
+// ---------------------------------------------------------------------------
+
+export function isRescuableBuild(
+  abandonedBuild: AbandonedBuild | null | undefined,
+  currentBuild: CurrentBuild | null | undefined,
+  todayStr: string,
+): boolean {
+  if (!abandonedBuild) return false;
+  if (currentBuild) return false;
+  const age = daysBetween(abandonedBuild.abandoned_on, todayStr);
+  return age >= 0 && age <= BUILD_RESCUE_WINDOW_DAYS;
+}
+
+// ---------------------------------------------------------------------------
+// applyBuildRescue — spend one streak freeze to resume a stalled build
+//
+// Returns the fields to write, or null when there is nothing to rescue
+// (no record, window passed, another build already running) or the group
+// holds no freezes. Progress is preserved exactly: `days_completed` is
+// untouched, so the crew gets a fresh shot at the day they missed.
+// ---------------------------------------------------------------------------
+
+export function applyBuildRescue(params: {
+  abandonedBuild: AbandonedBuild | null;
+  currentBuild: CurrentBuild | null;
+  streakFreezes: number;
+  todayStr: string;
+}): {
+  current_build: CurrentBuild;
+  abandoned_build: null;
+  streak_freezes: number;
+} | null {
+  const { abandonedBuild, currentBuild, streakFreezes, todayStr } = params;
+  if (!isRescuableBuild(abandonedBuild, currentBuild, todayStr)) return null;
+  if (streakFreezes < 1) return null;
+
+  return {
+    current_build: {
+      type: abandonedBuild!.type,
+      days_required: abandonedBuild!.days_required,
+      days_completed: abandonedBuild!.days_completed,
+    },
+    abandoned_build: null,
+    streak_freezes: streakFreezes - 1,
+  };
 }
 
 // ---------------------------------------------------------------------------

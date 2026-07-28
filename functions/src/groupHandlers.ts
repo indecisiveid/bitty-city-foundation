@@ -8,6 +8,7 @@ import {
   getProcessingDate,
   processEndOfDay,
   applyStreakRepair,
+  applyBuildRescue,
   isFirstDayGrace,
   findEmptyTiles,
   BUILDING_DAYS,
@@ -78,6 +79,7 @@ async function maybeProcessDay(
     groupMembers: data.group_members,
     completionsToday: data.completions_today,
     currentBuild: data.current_build ?? null,
+    abandonedBuild: data.abandoned_build ?? null,
     cityMap: data.city_map,
     streak: data.streak,
     buildingCompletions: data.building_completions ?? [],
@@ -115,6 +117,24 @@ async function maybeProcessDay(
     await notifyAllMembers(groupId, merged, {
       title: `🏙️ ${merged.group_name ?? "Your city"} grew!`,
       body: `Your crew finished ${withArticle(label)}. Come see it in the city.`,
+    });
+  }
+
+  // "Build stalled" push: a multi-day build lost a day. Nothing was
+  // destroyed, but the crew has only today to spend a freeze and resume it.
+  const stalled = writeUpdates.abandoned_build as
+    | { type?: string; days_completed?: number; days_required?: number }
+    | null
+    | undefined;
+  if (stalled) {
+    const label = BUILDING_LABEL[stalled.type ?? ""] ?? "building";
+    const freezes = (writeUpdates.streak_freezes as number | undefined) ?? 0;
+    await notifyAllMembers(groupId, merged, {
+      title: `🚧 Your ${label} build stalled`,
+      body:
+        freezes > 0
+          ? `Yesterday's goal wasn't finished by everyone. Open the app today to spend a streak freeze and pick it back up — after today it's gone.`
+          : `Yesterday's goal wasn't finished by everyone, and there are no streak freezes left. You'll need to start a new build.`,
     });
   }
 
@@ -180,6 +200,7 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           last_activity_date: getProcessingDate(goalResetTime, goalResetTimezone),
           last_inactivity_meteor_date: null,
           current_build: null,
+          abandoned_build: null,
           city_map: EMPTY_CITY,
           last_processed_date: null,
           pending_event: null,
@@ -505,8 +526,9 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
       days_completed: 0,
     };
 
-    tx.update(groupRef, { current_build: newBuild });
-    finalData = { ...freshData, current_build: newBuild };
+    // Choosing a new build gives up any stalled one still on offer.
+    tx.update(groupRef, { current_build: newBuild, abandoned_build: null });
+    finalData = { ...freshData, current_build: newBuild, abandoned_build: null };
     pickerName = member;
   });
 
@@ -524,6 +546,85 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
         body: `${pickerName} picked ${withArticle(label)} for ${finalData!.group_name ?? "your city"}. ${span}`,
       },
       pickerName,
+    );
+  }
+
+  return groupToResponse(group_id, finalData!);
+});
+
+// --- rescueBuild ---
+//
+// Spend one streak freeze to resume a build that stalled on a missed day.
+// Runs in a transaction so two members tapping at once can't burn two
+// freezes for one rescue — the loser finds `abandoned_build` already null
+// and gets a failed-precondition.
+
+export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const { group_id } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  let data = snap.data()!;
+  memberNameForUid(data, uid);
+
+  // Settle any pending day first so `abandoned_build` is current.
+  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
+    data = await maybeProcessDay(group_id, data);
+  }
+
+  const today = getProcessingDate(
+    data.goal_reset_time,
+    data.goal_reset_timezone ?? "UTC",
+  );
+
+  let rescuerName: string | null = null;
+  let buildType = "";
+  let finalData: FirebaseFirestore.DocumentData;
+
+  await db().runTransaction(async (tx) => {
+    const freshSnap = await tx.get(groupRef);
+    const freshData = freshSnap.data()!;
+    const member = memberNameForUid(freshData, uid);
+
+    const rescued = applyBuildRescue({
+      abandonedBuild: freshData.abandoned_build ?? null,
+      currentBuild: freshData.current_build ?? null,
+      streakFreezes: freshData.streak_freezes ?? 0,
+      todayStr: today,
+    });
+
+    if (!rescued) {
+      throw new HttpsError(
+        "failed-precondition",
+        "There's no stalled build to rescue, or no streak freeze to spend",
+      );
+    }
+
+    tx.update(groupRef, rescued);
+    finalData = { ...freshData, ...rescued };
+    rescuerName = member;
+    buildType = rescued.current_build.type;
+  });
+
+  if (rescuerName) {
+    const label = BUILDING_LABEL[buildType] ?? "building";
+    await notifyAllMembers(
+      group_id,
+      finalData!,
+      {
+        title: `🧊 The ${label} build is back on`,
+        body: `${rescuerName} spent a streak freeze to save it. Finish today's goal to keep it moving.`,
+      },
+      rescuerName,
     );
   }
 

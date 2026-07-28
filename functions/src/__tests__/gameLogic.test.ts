@@ -14,6 +14,8 @@ import {
   getProcessingDate,
   processEndOfDay,
   applyStreakRepair,
+  applyBuildRescue,
+  isRescuableBuild,
   isFirstDayGrace,
   daysBetween,
   findOccupiedTiles,
@@ -372,35 +374,172 @@ describe("processEndOfDay — first-day grace", () => {
   });
 });
 
-describe("processEndOfDay — standard missed-day asteroid", () => {
-  it("fires with cause missed_day and destroys at least one tile", () => {
+describe("processEndOfDay — missed build day (no asteroid)", () => {
+  const build = { type: "apartment", days_required: 3, days_completed: 1 };
+
+  it("stops the build without touching the city", () => {
     const updates = processEndOfDay(
-      baseParams({
-        currentBuild: { type: "house", days_required: 1, days_completed: 0 },
-        cityMap: mapWithHouses(5),
-      }),
+      baseParams({ currentBuild: build, cityMap: mapWithHouses(5) }),
     );
     expect(updates.current_build).toBeNull();
-    expect(updates.pending_event?.type).toBe("asteroid");
-    expect(updates.pending_event?.cause).toBe("missed_day");
-    const destroyed = updates.pending_event?.tiles_destroyed ?? [];
-    expect(destroyed.length).toBeGreaterThanOrEqual(1);
-    expect(destroyed.length).toBeLessThanOrEqual(3);
-    // destroyed tiles are rubble in the new map
-    for (const { row, col } of destroyed) {
-      expect(updates.city_map![String(row)][col]).toBe("rubble");
+    // The whole point of the card: nothing is destroyed.
+    expect(updates.pending_event).toBeUndefined();
+    expect(updates.city_map).toBeUndefined();
+    expect(updates.tile_build_dates).toBeUndefined();
+  });
+
+  it("holds the build for rescue with its progress intact", () => {
+    const updates = processEndOfDay(
+      baseParams({ currentBuild: build, cityMap: mapWithHouses(5) }),
+    );
+    expect(updates.abandoned_build).toEqual({
+      type: "apartment",
+      days_required: 3,
+      days_completed: 1,
+      abandoned_on: TODAY,
+    });
+  });
+
+  it("never fires a missed_day asteroid at any city size", () => {
+    for (const n of [0, 1, 2, 5, 20]) {
+      const updates = processEndOfDay(
+        baseParams({ currentBuild: build, cityMap: mapWithHouses(n) }),
+      );
+      expect(updates.pending_event?.cause).not.toBe("missed_day");
     }
   });
 
-  it("never destroys the last remaining building", () => {
+  it("makes no rescue offer on a grace day (the build simply survives)", () => {
+    const updates = processEndOfDay(
+      baseParams({ currentBuild: build, cityMap: mapWithHouses(5), isGraceDay: true }),
+    );
+    expect(updates.current_build).toBeUndefined();
+    expect(updates.abandoned_build).toBeUndefined();
+  });
+
+  it("makes no rescue offer when the 7-day meteor fires (that's abandonment)", () => {
     const updates = processEndOfDay(
       baseParams({
-        currentBuild: { type: "house", days_required: 1, days_completed: 0 },
-        cityMap: mapWithHouses(1),
+        currentBuild: build,
+        cityMap: mapWithHouses(9),
+        lastActivityDate: "2026-04-20",
       }),
     );
-    expect(updates.pending_event).toBeUndefined();
-    expect(updates.city_map).toBeUndefined();
+    expect(updates.current_build).toBeNull();
+    expect(updates.abandoned_build ?? null).toBeNull(); // no offer made
+    expect(updates.pending_event?.cause).toBe("inactivity");
+  });
+
+  it("expires an offer made on an earlier day", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        currentBuild: null,
+        abandonedBuild: {
+          type: "house",
+          days_required: 1,
+          days_completed: 0,
+          abandoned_on: "2026-05-02",
+        },
+        cityMap: mapWithHouses(5),
+      }),
+    );
+    expect(updates.abandoned_build).toBeNull();
+  });
+
+  it("leaves today's fresh offer alone", () => {
+    const offer = {
+      type: "house",
+      days_required: 1,
+      days_completed: 0,
+      abandoned_on: TODAY,
+    };
+    const updates = processEndOfDay(
+      baseParams({ currentBuild: null, abandonedBuild: offer, cityMap: mapWithHouses(5) }),
+    );
+    expect(updates.abandoned_build).toBeUndefined(); // untouched
+  });
+});
+
+describe("isRescuableBuild / applyBuildRescue", () => {
+  const offer = {
+    type: "skyscraper",
+    days_required: 7,
+    days_completed: 4,
+    abandoned_on: "2026-05-03", // yesterday relative to TODAY
+  };
+
+  it("is rescuable the day after the miss", () => {
+    expect(isRescuableBuild(offer, null, TODAY)).toBe(true);
+  });
+
+  it("is not rescuable two days later", () => {
+    expect(isRescuableBuild(offer, null, "2026-05-05")).toBe(false);
+  });
+
+  it("is not rescuable once another build is running", () => {
+    const running = { type: "house", days_required: 1, days_completed: 0 };
+    expect(isRescuableBuild(offer, running, TODAY)).toBe(false);
+  });
+
+  it("is not rescuable with no record", () => {
+    expect(isRescuableBuild(null, null, TODAY)).toBe(false);
+  });
+
+  it("spends one freeze and restores the build at its stalled progress", () => {
+    const result = applyBuildRescue({
+      abandonedBuild: offer,
+      currentBuild: null,
+      streakFreezes: 2,
+      todayStr: TODAY,
+    });
+    expect(result).toEqual({
+      current_build: { type: "skyscraper", days_required: 7, days_completed: 4 },
+      abandoned_build: null,
+      streak_freezes: 1,
+    });
+  });
+
+  it("refuses with zero freezes — the build is lost", () => {
+    expect(
+      applyBuildRescue({
+        abandonedBuild: offer,
+        currentBuild: null,
+        streakFreezes: 0,
+        todayStr: TODAY,
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses outside the one-day window", () => {
+    expect(
+      applyBuildRescue({
+        abandonedBuild: offer,
+        currentBuild: null,
+        streakFreezes: 3,
+        todayStr: "2026-05-06",
+      }),
+    ).toBeNull();
+  });
+
+  it("rescued build then advances normally on a successful day", () => {
+    const rescued = applyBuildRescue({
+      abandonedBuild: offer,
+      currentBuild: null,
+      streakFreezes: 1,
+      todayStr: TODAY,
+    })!;
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        currentBuild: rescued.current_build,
+        cityMap: mapWithHouses(5),
+      }),
+    );
+    expect(updates.current_build).toEqual({
+      type: "skyscraper",
+      days_required: 7,
+      days_completed: 5,
+    });
   });
 });
 
@@ -419,14 +558,14 @@ describe("processEndOfDay — tile build dates", () => {
     expect(updates.tile_build_dates?.[`${tile![0]},${tile![1]}`]).toBe(TODAY);
   });
 
-  it("clears the date of a tile destroyed by an asteroid, keeps survivors", () => {
+  it("clears the date of a tile destroyed by the meteor, keeps survivors", () => {
     const cityMap = mapWithHouses(5);
     const seeded: Record<string, string> = {};
     for (const { row, col } of findOccupiedTiles(cityMap)) seeded[`${row},${col}`] = "2026-01-01";
     const updates = processEndOfDay(
       baseParams({
-        currentBuild: { type: "house", days_required: 1, days_completed: 0 },
         cityMap,
+        lastActivityDate: "2026-04-20",
         tileBuildDates: seeded,
       }),
     );

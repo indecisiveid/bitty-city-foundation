@@ -336,6 +336,62 @@ async function main() {
   const repairAgain = await call('repairStreak', { group_id: g.group_id }, dev);
   check('second repair rejected', repairAgain.error === 'FAILED_PRECONDITION');
 
+  console.log('— missed build day → rescue —');
+  // Seed: a 3-day apartment 1 day in, yesterday unprocessed and nobody
+  // completed, 1 freeze in stock, city already has buildings to lose.
+  const buildingsBefore = (cityMap) =>
+    Object.values(cityMap ?? {}).flat().filter((t) => t && t !== 'rubble').length;
+  const preRescue = await call('getGroup', { group_id: g.group_id }, dev);
+  const cityBefore = buildingsBefore(preRescue.result?.city_map);
+  check('city has buildings to risk', cityBefore >= 1, `count=${cityBefore}`);
+
+  const missSeed = {
+    current_build: {
+      mapValue: {
+        fields: {
+          type: { stringValue: 'apartment' },
+          days_required: { integerValue: '3' },
+          days_completed: { integerValue: '1' },
+        },
+      },
+    },
+    abandoned_build: { nullValue: null },
+    completions_today: { arrayValue: {} },
+    streak_freezes: { integerValue: '1' },
+    last_processed_date: { stringValue: ymdDaysAgo(2) },
+    last_activity_date: { stringValue: ymdDaysAgo(2) },
+    pending_event: { nullValue: null },
+    created_at: { timestampValue: new Date(Date.now() - 15 * 86400000).toISOString() },
+  };
+  await adminPatch(`groups/${g.group_id}`, missSeed, Object.keys(missSeed));
+  const afterMiss = await call('getGroup', { group_id: g.group_id }, dev);
+  check('missed build day clears current_build', afterMiss.result?.current_build === null,
+    JSON.stringify(afterMiss.result?.current_build));
+  check('missed build day fires NO asteroid',
+    (afterMiss.result?.pending_event?.cause ?? null) !== 'missed_day',
+    JSON.stringify(afterMiss.result?.pending_event));
+  check('missed build day destroys nothing',
+    buildingsBefore(afterMiss.result?.city_map) === cityBefore,
+    `before=${cityBefore} after=${buildingsBefore(afterMiss.result?.city_map)}`);
+  check('build held for rescue at its progress',
+    afterMiss.result?.abandoned_build?.type === 'apartment' &&
+      afterMiss.result?.abandoned_build?.days_completed === 1,
+    JSON.stringify(afterMiss.result?.abandoned_build));
+
+  const rescued = await call('rescueBuild', { group_id: g.group_id }, dev);
+  check('rescueBuild restores the build', rescued.result?.current_build?.type === 'apartment',
+    JSON.stringify(rescued.result?.current_build));
+  check('rescueBuild preserves progress', rescued.result?.current_build?.days_completed === 1,
+    JSON.stringify(rescued.result?.current_build));
+  check('rescueBuild spent one freeze', rescued.result?.streak_freezes === 0,
+    `freezes=${rescued.result?.streak_freezes}`);
+  check('rescueBuild cleared the offer', rescued.result?.abandoned_build === null);
+  const rescueAgain = await call('rescueBuild', { group_id: g.group_id }, dev);
+  check('second rescue rejected', rescueAgain.error === 'FAILED_PRECONDITION',
+    JSON.stringify(rescueAgain));
+  const rescueByStranger = await call('rescueBuild', { group_id: g.group_id });
+  check('rescueBuild requires auth', rescueByStranger.error === 'UNAUTHENTICATED');
+
   console.log('— leave / delete cleanup —');
   const bobLeaves = await call('leaveGroup', { group_id: g.group_id }, bob);
   check('member leaves', bobLeaves.result?.success === true, JSON.stringify(bobLeaves));
