@@ -24,6 +24,7 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
+import { NotificationCategory } from "./push";
 import { BUILDING_LABEL, buildProgressOf, withArticle } from "./buildings";
 
 const db = () => getFirestore();
@@ -428,6 +429,12 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       await notifyMembers(group_id, finalData!, stillPending, {
         title: finalData!.group_name ?? "Bitty City",
         body: `${completedName} completed today's goal. Your turn!`,
+        // Everyone on this list has NOT completed yet, and `completedName`
+        // has — exactly the precondition `sendKudos` enforces — so the
+        // notification can carry a one-tap **Send kudos** button. The name
+        // travels in the data payload; the app never guesses the recipient.
+        categoryId: NotificationCategory.TEAMMATE_COMPLETED,
+        data: { type: "teammate_completed", completed_by: completedName },
       });
     } else {
       // That was the last one — the whole crew is in. Celebrate the day and

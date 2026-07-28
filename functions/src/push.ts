@@ -12,7 +12,7 @@
  * FCM and which tokens FCM rejected. Deciding *who* to notify lives in
  * notify.ts; deciding *when* lives in the handlers / scheduler.
  */
-import { getMessaging } from "firebase-admin/messaging";
+import { getMessaging, Aps } from "firebase-admin/messaging";
 
 // sendEachForMulticast accepts up to 500 tokens per call.
 const CHUNK = 500;
@@ -24,12 +24,36 @@ const DEAD_TOKEN_CODES = new Set([
   "messaging/invalid-argument",
 ]);
 
+/**
+ * iOS notification categories.
+ *
+ * A category is how APNs knows which action buttons to hang off a
+ * notification: the app registers `UNNotificationCategory`s at runtime (see
+ * `mobile/src/notifications/categories.ts`) and the push names one via
+ * `aps.category`. If the id we send here doesn't match an id the app
+ * registered, iOS silently renders the notification with no buttons — so
+ * these two lists must stay in lockstep. Each side has a test pinning the
+ * literal.
+ */
+export const NotificationCategory = {
+  /** "<Name> completed today's goal" → carries a **Send kudos** button. */
+  TEAMMATE_COMPLETED: "bitty.teammate-completed",
+} as const;
+
 export interface PushPayload {
   title: string;
   body: string;
   /** Arbitrary data delivered to the app (e.g. `{ group_id, group_name }`
    *  so a tap can deep-link to the city). FCM data values must be strings. */
   data?: Record<string, unknown>;
+  /**
+   * iOS category id (see `NotificationCategory`) — adds the category's action
+   * buttons to the notification. Also mirrored into the data payload as
+   * `category` so the app can re-apply it when *it* draws the banner (a
+   * message that lands while foregrounded is rendered by Notifee, not APNs,
+   * and would otherwise lose its buttons).
+   */
+  categoryId?: string;
 }
 
 /** FCM registration tokens are opaque, non-empty strings. */
@@ -53,6 +77,34 @@ function stringifyData(data?: Record<string, unknown>): Record<string, string> {
 }
 
 /**
+ * The exact `aps` dictionary we hand APNs, split out so it can be tested
+ * without a Messaging mock.
+ *
+ * Explicit `alert` so APNs always renders a visible banner — a bare `aps`
+ * with only `sound` can produce a silent (no-alert) push that FCM still
+ * reports as "success".
+ */
+export function apsFor(payload: PushPayload): Aps {
+  return {
+    alert: { title: payload.title, body: payload.body },
+    sound: "default",
+    ...(payload.categoryId ? { category: payload.categoryId } : {}),
+  };
+}
+
+/**
+ * Data payload as the app receives it. The category rides along so a
+ * foreground message (drawn by Notifee, not APNs) can be redrawn with the
+ * same action buttons.
+ */
+export function dataFor(payload: PushPayload): Record<string, string> {
+  return stringifyData({
+    ...(payload.data ?? {}),
+    ...(payload.categoryId ? { category: payload.categoryId } : {}),
+  });
+}
+
+/**
  * Send one payload to many tokens. Returns the subset of tokens FCM reports as
  * permanently invalid so the caller can prune them from the user docs.
  * Transient / network errors are logged and swallowed — a failed notification
@@ -66,7 +118,8 @@ export async function sendPush(
   if (valid.length === 0) return [];
 
   const invalid: string[] = [];
-  const data = stringifyData(payload.data);
+  const data = dataFor(payload);
+  const aps = apsFor(payload);
 
   for (const group of chunk(valid, CHUNK)) {
     try {
@@ -74,17 +127,7 @@ export async function sendPush(
         tokens: group,
         notification: { title: payload.title, body: payload.body },
         data,
-        apns: {
-          payload: {
-            aps: {
-              // Explicit alert so APNs always renders a visible banner — a bare
-              // `aps` with only `sound` can produce a silent (no-alert) push
-              // that FCM still reports as "success".
-              alert: { title: payload.title, body: payload.body },
-              sound: "default",
-            },
-          },
-        },
+        apns: { payload: { aps } },
       });
 
       if (res.failureCount > 0) {
