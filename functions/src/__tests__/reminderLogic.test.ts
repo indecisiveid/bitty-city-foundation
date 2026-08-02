@@ -12,7 +12,8 @@ import {
 } from "../reminderLogic";
 import { INACTIVITY_METEOR_DAYS } from "../gameLogic";
 import { isValidPushToken } from "../push";
-import { buildProgressOf, withArticle, BUILDING_LABEL } from "../buildings";
+import { buildProgressOf, withArticle } from "../buildings";
+import { CATALOG, LEGACY_LABEL } from "../buildCatalog";
 import { messageFor } from "../scheduled";
 import { dayCompleteMessage } from "../groupHandlers";
 
@@ -153,7 +154,13 @@ describe("withArticle", () => {
   });
 
   it("reads correctly for every building label we ship", () => {
-    for (const label of Object.values(BUILDING_LABEL)) {
+    // The whole catalog, not just the legacy three — "Apartments" begins with
+    // a vowel, which is precisely the case this guards.
+    const labels: string[] = [
+      ...CATALOG.map((i) => i.label),
+      ...Object.values(LEGACY_LABEL),
+    ];
+    for (const label of labels) {
       const phrase = withArticle(label);
       expect(phrase).toMatch(/^an? \w/);
       // "a Apartment" is the bug this guards against.

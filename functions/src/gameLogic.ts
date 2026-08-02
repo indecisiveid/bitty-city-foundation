@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { DateTime } from "luxon";
+import { daysFor } from "./buildCatalog";
 
 export const BUILDING_DAYS: Record<string, number> = {
   house: 1,
@@ -7,12 +8,19 @@ export const BUILDING_DAYS: Record<string, number> = {
   skyscraper: 7,
 };
 
-// Weights for asteroid targeting (higher = more likely to be hit)
-const DESTROY_WEIGHTS: Record<string, number> = {
-  house: 3,
-  apartment: 2,
-  skyscraper: 1,
-};
+// Weights for asteroid targeting (higher = more likely to be hit).
+//
+// Derived from the build's day cost rather than a name table: a table keyed on
+// 'house' | 'apartment' | 'skyscraper' silently fell through to the default
+// weight for every catalog id, which would have quietly flattened the bias to
+// uniform the moment the new vocabulary shipped. Cheap builds are likelier to
+// be hit, so losing one stings less than losing a week's work.
+function destroyWeight(type: string): number {
+  const days = daysFor(type) ?? 1;
+  if (days >= 7) return 1;
+  if (days >= 3) return 2;
+  return 3;
+}
 
 // --- Streak forgiveness ---
 // Groups hold a small stock of "streak freezes". A missed day that would
@@ -354,7 +362,7 @@ function destroyBuildings(
 ): { map: CityMap; tiles: Array<{ row: number; col: number }> } {
   const occupied = findOccupiedTiles(cityMap);
   const remaining = [...occupied];
-  const remainingWeights = remaining.map((t) => DESTROY_WEIGHTS[t.type] || 1);
+  const remainingWeights = remaining.map((t) => destroyWeight(t.type));
   const picked: Array<{ row: number; col: number }> = [];
 
   const n = Math.min(count, remaining.length);

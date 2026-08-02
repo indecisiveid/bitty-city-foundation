@@ -11,7 +11,6 @@ import {
   applyBuildRescue,
   isFirstDayGrace,
   findEmptyTiles,
-  BUILDING_DAYS,
   STARTING_FREEZES,
 } from "./gameLogic";
 import {
@@ -26,7 +25,8 @@ import {
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
 import { NotificationCategory } from "./push";
-import { BUILDING_LABEL, buildProgressOf, withArticle } from "./buildings";
+import { buildProgressOf, withArticle } from "./buildings";
+import { isBuildable, buildableIds, daysFor, labelFor } from "./buildCatalog";
 
 const db = () => getFirestore();
 
@@ -113,7 +113,7 @@ async function maybeProcessDay(
   // it won't re-fire. Best-effort — notify never throws.
   const event = writeUpdates.pending_event as { type?: string; building?: string } | undefined;
   if (event?.type === "build_complete") {
-    const label = BUILDING_LABEL[event.building ?? ""] ?? "building";
+    const label = labelFor(event.building ?? "");
     await notifyAllMembers(groupId, merged, {
       title: `🏙️ ${merged.group_name ?? "Your city"} grew!`,
       body: `Your crew finished ${withArticle(label)}. Come see it in the city.`,
@@ -127,7 +127,7 @@ async function maybeProcessDay(
     | null
     | undefined;
   if (stalled) {
-    const label = BUILDING_LABEL[stalled.type ?? ""] ?? "building";
+    const label = labelFor(stalled.type ?? "");
     const freezes = (writeUpdates.streak_freezes as number | undefined) ?? 0;
     await notifyAllMembers(groupId, merged, {
       title: `🚧 Your ${label} build stalled`,
@@ -478,10 +478,13 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
     throw new HttpsError("invalid-argument", "group_id and type are required");
   }
 
-  if (!(type in BUILDING_DAYS)) {
+  // Only catalog ids may be STARTED. Legacy values ('house' etc.) stay
+  // readable everywhere else so in-flight builds and standing cities keep
+  // working, but a new build always uses the current vocabulary.
+  if (!isBuildable(type)) {
     throw new HttpsError(
       "invalid-argument",
-      `Invalid building type. Must be one of: ${Object.keys(BUILDING_DAYS).join(", ")}`,
+      `Invalid build. Must be one of: ${buildableIds().join(", ")}`,
     );
   }
 
@@ -522,7 +525,7 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
 
     const newBuild = {
       type,
-      days_required: BUILDING_DAYS[type],
+      days_required: daysFor(type)!,
       days_completed: 0,
     };
 
@@ -535,8 +538,8 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
   // "Someone picked the next build" push → tell the rest of the crew what
   // they're working toward. Best-effort, after the write.
   if (pickerName) {
-    const label = BUILDING_LABEL[type] ?? "building";
-    const days: number = BUILDING_DAYS[type];
+    const label = labelFor(type);
+    const days: number = daysFor(type)!;
     const span = days === 1 ? "Today's goal builds it." : `It takes ${days} days of everyone completing their goal.`;
     await notifyAllMembers(
       group_id,
@@ -616,7 +619,7 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
   });
 
   if (rescuerName) {
-    const label = BUILDING_LABEL[buildType] ?? "building";
+    const label = labelFor(buildType);
     await notifyAllMembers(
       group_id,
       finalData!,

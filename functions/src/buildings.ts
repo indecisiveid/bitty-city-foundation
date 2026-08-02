@@ -3,13 +3,7 @@
  * "city grew" push) and the scheduler (the morning "Day X of Y" nudge) so a
  * building is never called two different things in two different pushes.
  */
-import { BUILDING_DAYS } from "./gameLogic";
-
-export const BUILDING_LABEL: Record<string, string> = {
-  house: "House",
-  apartment: "Apartment",
-  skyscraper: "Skyscraper",
-};
+import { daysFor, labelFor } from "./buildCatalog";
 
 /**
  * "a House" / "an Apartment". The labels are a closed, hand-written set, so a
@@ -43,7 +37,7 @@ export function buildProgressOf(currentBuild: unknown): BuildProgress | null {
     days_completed?: number;
   };
   const type = build.type ?? "";
-  const daysRequired = build.days_required ?? BUILDING_DAYS[type] ?? 0;
+  const daysRequired = build.days_required ?? daysFor(type) ?? 0;
   if (daysRequired < 2) return null;
 
   const daysCompleted = build.days_completed ?? 0;
@@ -51,7 +45,7 @@ export function buildProgressOf(currentBuild: unknown): BuildProgress | null {
   const dayNumber = Math.min(daysCompleted + 1, daysRequired);
 
   return {
-    label: BUILDING_LABEL[type] ?? "building",
+    label: labelFor(type),
     dayNumber,
     daysRequired,
   };

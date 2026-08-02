@@ -8,6 +8,7 @@ import {
 } from "./gameLogic";
 import { EMPTY_CITY, GRID_ROWS, GRID_COLS, groupToResponse } from "./utils";
 import { requireDemoAccess } from "./auth";
+import { buildableIds } from "./buildCatalog";
 
 const db = () => getFirestore();
 
@@ -39,7 +40,7 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
   // If no active build, inject a dummy so the asteroid branch fires
   let currentBuild = data.current_build;
   if (currentBuild === null) {
-    currentBuild = { type: "house", days_required: 1, days_completed: 0 };
+    currentBuild = { type: "house_a", days_required: 1, days_completed: 0 };
   }
 
   const processingDate = getProcessingDate(
@@ -107,7 +108,10 @@ export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) =>
     tilesToFill = empty;
   }
 
-  const buildingTypes = ["house", "apartment", "skyscraper"];
+  // Catalog ids, so dev-seeded cities look like cities real players will
+  // have. Spread across tiers to exercise the variety.
+  const buildingTypes = ["house_a", "house_b", "apartment_c", "apartment_e",
+    "tenement_g", "skyscraper_slim"];
   const newMap = Object.fromEntries(
     Object.entries(cityMap).map(([k, row]) => [k, [...(row as (string | null)[])]]),
   );
@@ -131,13 +135,15 @@ export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) =>
 
 export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request) => {
   requireDemoAccess(request);
-  const { group_id, count, type = "house" } = request.data;
+  const { group_id, count, type = "house_a" } = request.data;
 
   if (!group_id) {
     throw new HttpsError("invalid-argument", "group_id is required");
   }
 
-  const validTypes = ["house", "apartment", "skyscraper"];
+  // Legacy names stay valid here on purpose: these tools are also how a
+  // legacy-shaped city gets reproduced for testing the compatibility path.
+  const validTypes = [...buildableIds(), "house", "apartment", "skyscraper"];
   if (!validTypes.includes(type)) {
     throw new HttpsError(
       "invalid-argument",
