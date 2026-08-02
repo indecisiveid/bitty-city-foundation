@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { DateTime } from "luxon";
-import { daysFor } from "./buildCatalog";
+import { daysFor, isKnownBuild } from "./buildCatalog";
 
 export const BUILDING_DAYS: Record<string, number> = {
   house: 1,
@@ -328,7 +328,13 @@ export function findOccupiedTiles(
     const r = parseInt(rStr, 10);
     for (let c = 0; c < row.length; c++) {
       const cell = row[c];
-      if (cell === "house" || cell === "apartment" || cell === "skyscraper") {
+      // Any known build, current vocabulary or legacy — NOT a hard-coded list
+      // of the three v1.0 type names. That list silently excluded every
+      // catalog id, which made cities built with the new vocabulary immune to
+      // both the meteor and the missed-day asteroid: nothing counted as
+      // occupied, so nothing could be destroyed. `null` and `"rubble"` are
+      // correctly excluded because neither is a build.
+      if (typeof cell === "string" && isKnownBuild(cell)) {
         tiles.push({ row: r, col: c, type: cell });
       }
     }
