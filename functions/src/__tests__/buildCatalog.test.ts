@@ -7,6 +7,7 @@ import {
   daysFor,
   labelFor,
   buildableIds,
+  isCatalogId,
   LEGACY_DAYS,
 } from "../buildCatalog";
 
@@ -16,16 +17,23 @@ describe("build catalog", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("only allows catalog ids to START a build", () => {
-    for (const id of buildableIds()) expect(isBuildable(id)).toBe(true);
-    // Legacy values are readable but NOT startable — a new build always uses
-    // the current vocabulary.
+  it("lets the SHIPPED app keep starting builds", () => {
+    // v1.0 is in the App Store sending 'house' | 'apartment' | 'skyscraper',
+    // and there is no forced update. If these stop being startable, every
+    // existing user loses "Pick a building" the moment it deploys.
     for (const legacy of Object.keys(LEGACY_DAYS)) {
-      expect(isBuildable(legacy)).toBe(false);
+      expect(isBuildable(legacy)).toBe(true);
       expect(isKnownBuild(legacy)).toBe(true);
     }
+    for (const id of CATALOG.map((i) => i.id)) expect(isBuildable(id)).toBe(true);
+    expect(buildableIds()).toEqual(expect.arrayContaining(["house", "house_a"]));
     expect(isBuildable("spaceport")).toBe(false);
     expect(isKnownBuild("spaceport")).toBe(false);
+  });
+
+  it("still distinguishes current vocabulary from legacy", () => {
+    expect(isCatalogId("house_a")).toBe(true);
+    expect(isCatalogId("house")).toBe(false);
   });
 
   it("resolves days and labels for catalog and legacy alike", () => {

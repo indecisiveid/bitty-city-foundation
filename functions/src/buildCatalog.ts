@@ -67,9 +67,25 @@ export const LEGACY_LABEL: Record<string, string> = {
   skyscraper: "Skyscraper",
 };
 
-/** Is this something a client is allowed to start building? */
-export function isBuildable(id: unknown): id is string {
+/** A current-vocabulary catalog id. */
+export function isCatalogId(id: unknown): id is string {
   return typeof id === "string" && BY_ID.has(id);
+}
+
+/**
+ * Is this something a client is allowed to START building?
+ *
+ * Catalog ids AND the v1.0 vocabulary. The legacy names are NOT a courtesy —
+ * the app in the App Store right now sends `type: 'house'`, and there is no
+ * forced update. Restricting this to catalog ids would break "Pick a building"
+ * for every existing user the moment it deployed, and leave them stuck until
+ * they happened to update. The emulator smoke caught exactly that.
+ *
+ * These stay startable until the new build is broadly adopted; retiring them
+ * is a later, deliberate decision with adoption numbers behind it.
+ */
+export function isBuildable(id: unknown): id is string {
+  return isCatalogId(id) || (typeof id === "string" && id in LEGACY_DAYS);
 }
 
 /** Anything a `city_map` cell or `current_build` may legitimately hold. */
@@ -91,5 +107,5 @@ export function itemFor(id: string): CatalogItem | undefined {
 
 /** Ids a client may pass to `selectBuild`, for the error message. */
 export function buildableIds(): string[] {
-  return CATALOG.map((i) => i.id);
+  return [...CATALOG.map((i) => i.id), ...Object.keys(LEGACY_DAYS)];
 }
