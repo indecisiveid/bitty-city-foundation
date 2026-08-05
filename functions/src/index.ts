@@ -22,4 +22,6 @@ export { registerPushToken, unregisterPushToken, sendTestPush } from "./notifica
 
 export { sendKudos } from "./kudosHandlers";
 
+export { sendNudge } from "./nudgeHandlers";
+
 export { dailyNudge } from "./scheduled";

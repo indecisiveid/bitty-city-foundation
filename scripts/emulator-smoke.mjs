@@ -214,6 +214,39 @@ async function main() {
   const build2 = await call('selectBuild', { group_id: g.group_id, type: 'house' }, dev);
   check('second selectBuild rejected', build2.error === 'FAILED_PRECONDITION');
 
+  console.log('— peer nudges —');
+  // A nudge is for someone who is LATE, so clear today's completions; the
+  // house selected just above is the build in progress they're late for.
+  await adminPatch(
+    `groups/${g.group_id}`,
+    { completions_today: { arrayValue: {} } },
+    ['completions_today'],
+  );
+  const nudgeSelf = await call('sendNudge', { group_id: g.group_id, to_member: 'Christian' }, dev);
+  check('self nudge rejected', nudgeSelf.error === 'FAILED_PRECONDITION', JSON.stringify(nudgeSelf));
+  const nudgeGhost = await call('sendNudge', { group_id: g.group_id, to_member: 'Nobody' }, dev);
+  check('nudge to a non-member rejected', nudgeGhost.error === 'NOT_FOUND', JSON.stringify(nudgeGhost));
+  const nudgeByOutsider = await call('sendNudge', { group_id: g.group_id, to_member: 'Christian' }, eve);
+  check('nudge from a non-member rejected', nudgeByOutsider.error === 'FAILED_PRECONDITION', JSON.stringify(nudgeByOutsider));
+  const nudge1 = await call('sendNudge', { group_id: g.group_id, to_member: 'Christian 2' }, dev);
+  check('sendNudge succeeds', nudge1.result?.is_new === true, JSON.stringify(nudge1).slice(0, 200));
+  check(
+    'nudge pair recorded',
+    JSON.stringify(nudge1.result?.nudges_today?.pairs) ===
+      JSON.stringify([{ from: 'Christian', to: 'Christian 2' }]),
+    JSON.stringify(nudge1.result?.nudges_today),
+  );
+  const nudge2 = await call('sendNudge', { group_id: g.group_id, to_member: 'Christian 2' }, dev);
+  check('repeat nudge is a silent no-op (once a day)', nudge2.result?.is_new === false, JSON.stringify(nudge2));
+  check('repeat nudge does not duplicate the pair', nudge2.result?.nudges_today?.pairs?.length === 1);
+  await call('completeGoal', { group_id: g.group_id }, bob);
+  const nudgeDone = await call('sendNudge', { group_id: g.group_id, to_member: 'Christian 2' }, dev);
+  check(
+    'nudging someone who already finished is rejected',
+    nudgeDone.error === 'FAILED_PRECONDITION',
+    JSON.stringify(nudgeDone),
+  );
+
   console.log('— firestore rules —');
   const memberRead = await readDoc(`groups/${g.group_id}`, dev);
   check('member can read group doc', memberRead.status === 200, `status=${memberRead.status}`);

@@ -102,6 +102,9 @@ async function maybeProcessDay(
     // hearts go with `completions_today`. (`kudos.ts` also date-stamps the
     // bucket, which covers the window before lazy processing runs.)
     kudos_today: null,
+    // Same for peer nudges — "you already reminded Sam" must not survive
+    // into a day where Sam is late again. See `nudges.ts`.
+    nudges_today: null,
   };
 
   await db().collection("groups").doc(groupId).update(writeUpdates);
