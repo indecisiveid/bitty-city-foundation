@@ -24,6 +24,19 @@ export interface Park {
   park_id: string;
   /** Footprint in cells: 9 (3×3) or 15 (3×5). */
   cells: 9 | 15;
+  /**
+   * How many buildings the city had when this park landed.
+   *
+   * This is the park's ANCHOR. A park renders as a block, and a block's
+   * position comes from the whole sequence of blocks before it — so a park
+   * appended after "however many building blocks exist right now" would move
+   * every time the city grew. Turning this count into a block index
+   * (`blocksVisibleCount`) pins its place in the sequence for good.
+   *
+   * A count rather than coordinates because the server has no idea what the
+   * block plan looks like; the client derives the whole thing from slot count.
+   */
+  built_at_buildings: number;
   /** Park-local cell index → damage level. Absent key = intact. */
   damage: Record<string, 1 | 2>;
   built_on: string;
@@ -61,7 +74,8 @@ export function normalizeParks(raw: unknown): Park[] {
       !!p &&
       typeof p === "object" &&
       typeof (p as Park).park_id === "string" &&
-      ((p as Park).cells === 9 || (p as Park).cells === 15),
+      ((p as Park).cells === 9 || (p as Park).cells === 15) &&
+      typeof (p as Park).built_at_buildings === "number",
   );
 }
 

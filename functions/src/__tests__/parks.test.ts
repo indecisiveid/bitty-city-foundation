@@ -54,6 +54,19 @@ describe("processEndOfDay — a completed park", () => {
     processingDate: "2026-08-04",
   };
 
+  it("anchors the park to the building count at landing", () => {
+    const cityMap = emptyMap(3, 6);
+    cityMap["0"][0] = "house_a";
+    cityMap["0"][1] = "house_a";
+    const updates = processEndOfDay({
+      ...base,
+      currentBuild: { type: "park_small", days_required: 5, days_completed: 4 },
+      cityMap,
+      parks: [],
+    });
+    expect(updates.parks![0].built_at_buildings).toBe(2);
+  });
+
   it("records a park and leaves city_map untouched", () => {
     const updates = processEndOfDay({
       ...base,
@@ -81,7 +94,7 @@ describe("processEndOfDay — a completed park", () => {
 
   it("appends rather than replacing, so a second park keeps the first", () => {
     const parks: Park[] = [
-      { park_id: "p1", cells: 9, damage: {}, built_on: "2026-08-03" },
+      { park_id: "p1", cells: 9, built_at_buildings: 4, damage: {}, built_on: "2026-08-03" },
     ];
     const updates = processEndOfDay({
       ...base,
@@ -137,7 +150,11 @@ describe("normalizeParks", () => {
   it("drops records whose footprint isn't one we can render", () => {
     expect(normalizeParks([{ park_id: "x", cells: 12 }])).toEqual([]);
     expect(
-      normalizeParks([{ park_id: "x", cells: 9, damage: {}, built_on: "d" }]),
+      normalizeParks([
+        { park_id: "x", cells: 9, built_at_buildings: 0, damage: {}, built_on: "d" },
+      ]),
     ).toHaveLength(1);
+    // Missing the anchor means we can't place it — drop rather than guess.
+    expect(normalizeParks([{ park_id: "x", cells: 9 }])).toEqual([]);
   });
 });

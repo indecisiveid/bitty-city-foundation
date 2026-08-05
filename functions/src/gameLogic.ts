@@ -518,6 +518,9 @@ export function processEndOfDay(params: {
           const park: Park = {
             park_id: makeParkId(),
             cells: (footprint.rows * footprint.cols) as 9 | 15,
+            // Anchors the park in the block sequence — see parks.ts. Counted
+            // from the grid the same way the client counts slots.
+            built_at_buildings: findOccupiedTiles(cityMap).length,
             damage: {},
             built_on: processingDate,
           };
