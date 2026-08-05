@@ -1,7 +1,6 @@
 import {
-  allocateParkRegion,
   isParkId,
-  parkCellKeys,
+  parkCellCount,
   parkFootprint,
   normalizeParks,
   Park,
@@ -9,9 +8,14 @@ import {
 import { findEmptyTiles, processEndOfDay, CityMap } from "../gameLogic";
 
 /**
- * Parks are the first thing that occupies the city WITHOUT occupying
- * `city_map`, so the risks are all about the two staying in agreement:
- * a building landing on the lawn, or the same cells being handed to two parks.
+ * A park is the first thing that occupies the city without occupying
+ * `city_map`, so these pin the two invariants that separation buys: the
+ * building grid is untouched, and a park is ONE building however many cells it
+ * covers.
+ *
+ * Note what is deliberately NOT here: coordinates. `city_map` row/col are
+ * bookkeeping, not geometry — `computeCityLayout` never reads them — so the
+ * server records only the footprint and the client does the placing.
  */
 
 function emptyMap(rows: number, cols: number): CityMap {
@@ -22,17 +26,15 @@ function emptyMap(rows: number, cols: number): CityMap {
 
 describe("park footprints", () => {
   it("maps the two catalog sizes to three-deep rectangles", () => {
-    // Both three deep so ONE layout rule covers both — interior is
+    // Both three deep so ONE layout rule covers both: interior is
     // (rows-2)×(cols-2), i.e. 1 cell at 3×3 and 3 at 3×5.
     expect(parkFootprint("park_small")).toEqual({ rows: 3, cols: 3 });
     expect(parkFootprint("park_large")).toEqual({ rows: 3, cols: 5 });
   });
 
-  it("counts cells consistent with the catalog", () => {
-    const s = parkFootprint("park_small")!;
-    const l = parkFootprint("park_large")!;
-    expect(s.rows * s.cols).toBe(9);
-    expect(l.rows * l.cols).toBe(15);
+  it("agrees with the catalog's cell counts", () => {
+    expect(parkCellCount("park_small")).toBe(9);
+    expect(parkCellCount("park_large")).toBe(15);
   });
 
   it("rejects buildings and junk", () => {
@@ -40,76 +42,6 @@ describe("park footprints", () => {
     expect(isParkId("house_a")).toBe(false);
     expect(isParkId("park_small")).toBe(true);
     expect(isParkId(undefined)).toBe(false);
-  });
-});
-
-describe("allocateParkRegion", () => {
-  it("returns exactly the footprint's cells, contiguous", () => {
-    const cells = allocateParkRegion(emptyMap(4, 6), [], 3, 5)!;
-    expect(cells).toHaveLength(15);
-    const rows = new Set(cells.map((c) => c.row));
-    const cols = new Set(cells.map((c) => c.col));
-    expect(rows.size).toBe(3);
-    expect(cols.size).toBe(5);
-  });
-
-  it("is deterministic — the same map always yields the same cells", () => {
-    // Placement must not wander between retries, or two writes of the same
-    // completed build would disagree about where the park is.
-    const a = allocateParkRegion(emptyMap(4, 6), [], 3, 3);
-    const b = allocateParkRegion(emptyMap(4, 6), [], 3, 3);
-    expect(a).toEqual(b);
-  });
-
-  it("never overlaps an existing park", () => {
-    const map = emptyMap(3, 6);
-    const first = allocateParkRegion(map, [], 3, 3)!;
-    const parks: Park[] = [
-      { park_id: "p1", cells: first, damage: {}, built_on: "2026-08-04" },
-    ];
-    const second = allocateParkRegion(map, parks, 3, 3)!;
-    const overlap = second.filter((c) =>
-      parkCellKeys(parks).has(`${c.row},${c.col}`),
-    );
-    expect(overlap).toEqual([]);
-  });
-
-  it("refuses to place over a building, but will pave rubble", () => {
-    const withBuilding = emptyMap(3, 3);
-    withBuilding["1"][1] = "house_a";
-    expect(allocateParkRegion(withBuilding, [], 3, 3)).toBeNull();
-
-    const withRubble = emptyMap(3, 3);
-    withRubble["1"][1] = "rubble";
-    // A cleared lot is exactly what a park is for.
-    expect(allocateParkRegion(withRubble, [], 3, 3)).toHaveLength(9);
-  });
-
-  it("returns null when the city is too small to hold the footprint", () => {
-    expect(allocateParkRegion(emptyMap(2, 2), [], 3, 3)).toBeNull();
-    expect(allocateParkRegion(emptyMap(3, 4), [], 3, 5)).toBeNull();
-  });
-});
-
-describe("findEmptyTiles excludes park cells", () => {
-  it("stops a building landing on the lawn", () => {
-    // The one coupling the separate-storage design introduces: park cells are
-    // null in city_map by design, so placement must subtract them explicitly.
-    const map = emptyMap(3, 6);
-    const cells = allocateParkRegion(map, [], 3, 3)!;
-    const parks: Park[] = [
-      { park_id: "p1", cells, damage: {}, built_on: "2026-08-04" },
-    ];
-    const empty = findEmptyTiles(map, parks);
-    const keys = new Set(empty.map(([r, c]) => `${r},${c}`));
-    for (const c of cells) expect(keys.has(`${c.row},${c.col}`)).toBe(false);
-    expect(empty).toHaveLength(3 * 6 - 9);
-  });
-
-  it("is unchanged for a city with no parks", () => {
-    expect(findEmptyTiles(emptyMap(3, 3))).toHaveLength(9);
-    expect(findEmptyTiles(emptyMap(3, 3), [])).toHaveLength(9);
-    expect(findEmptyTiles(emptyMap(3, 3), null)).toHaveLength(9);
   });
 });
 
@@ -123,49 +55,60 @@ describe("processEndOfDay — a completed park", () => {
   };
 
   it("records a park and leaves city_map untouched", () => {
-    const cityMap = emptyMap(3, 6);
     const updates = processEndOfDay({
       ...base,
       currentBuild: { type: "park_small", days_required: 5, days_completed: 4 },
-      cityMap,
+      cityMap: emptyMap(3, 6),
       parks: [],
     });
     expect(updates.parks).toHaveLength(1);
-    expect(updates.parks![0].cells).toHaveLength(9);
-    // The whole point: no sentinel in the building grid.
+    expect(updates.parks![0].cells).toBe(9);
+    // The whole point: no sentinel in the building grid, so slot indices and
+    // tile_build_dates keep meaning what they meant.
     expect(updates.city_map).toBeUndefined();
     expect(updates.current_build).toBeNull();
   });
 
+  it("records the large footprint for the 7-day park", () => {
+    const updates = processEndOfDay({
+      ...base,
+      currentBuild: { type: "park_large", days_required: 7, days_completed: 6 },
+      cityMap: emptyMap(3, 6),
+      parks: [],
+    });
+    expect(updates.parks![0].cells).toBe(15);
+  });
+
   it("appends rather than replacing, so a second park keeps the first", () => {
-    const cityMap = emptyMap(3, 6);
-    const first = allocateParkRegion(cityMap, [], 3, 3)!;
     const parks: Park[] = [
-      { park_id: "p1", cells: first, damage: {}, built_on: "2026-08-03" },
+      { park_id: "p1", cells: 9, damage: {}, built_on: "2026-08-03" },
     ];
     const updates = processEndOfDay({
       ...base,
       currentBuild: { type: "park_small", days_required: 5, days_completed: 4 },
-      cityMap,
+      cityMap: emptyMap(3, 6),
       parks,
     });
     expect(updates.parks).toHaveLength(2);
     expect(updates.parks![0].park_id).toBe("p1");
   });
 
-  it("keeps the build alive when there is no room, rather than spending it", () => {
-    // Clearing current_build here would burn the crew's entire streak on
-    // nothing — the single worst outcome in a streak game.
-    const full = emptyMap(3, 3);
+  it("lands even in a city with no free tiles — a park needs no tile", () => {
+    // A building would be stuck here; a park isn't, because it doesn't take a
+    // cell in the grid at all.
+    const full = emptyMap(2, 2);
+    full["0"][0] = "house_a";
+    full["0"][1] = "house_a";
+    full["1"][0] = "house_a";
     full["1"][1] = "house_a";
     const updates = processEndOfDay({
       ...base,
-      currentBuild: { type: "park_large", days_required: 7, days_completed: 6 },
+      currentBuild: { type: "park_small", days_required: 5, days_completed: 4 },
       cityMap: full,
       parks: [],
     });
-    expect(updates.parks).toBeUndefined();
-    expect(updates.current_build).toBeUndefined();
+    expect(updates.parks).toHaveLength(1);
+    expect(updates.current_build).toBeNull();
   });
 
   it("still lands ordinary buildings in city_map", () => {
@@ -178,6 +121,10 @@ describe("processEndOfDay — a completed park", () => {
     expect(updates.city_map).toBeDefined();
     expect(updates.parks).toBeUndefined();
   });
+
+  it("leaves findEmptyTiles alone — parks consume no grid cells", () => {
+    expect(findEmptyTiles(emptyMap(3, 3))).toHaveLength(9);
+  });
 });
 
 describe("normalizeParks", () => {
@@ -185,6 +132,12 @@ describe("normalizeParks", () => {
     expect(normalizeParks(undefined)).toEqual([]);
     expect(normalizeParks(null)).toEqual([]);
     expect(normalizeParks("nonsense")).toEqual([]);
-    expect(normalizeParks([{ nope: true }])).toEqual([]);
+  });
+
+  it("drops records whose footprint isn't one we can render", () => {
+    expect(normalizeParks([{ park_id: "x", cells: 12 }])).toEqual([]);
+    expect(
+      normalizeParks([{ park_id: "x", cells: 9, damage: {}, built_on: "d" }]),
+    ).toHaveLength(1);
   });
 });

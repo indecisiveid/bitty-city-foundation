@@ -1,11 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import {
-  Park,
-  allocateParkRegion,
-  makeParkId,
-  parkCellKeys,
-  parkFootprint,
-} from "./parks";
+import { Park, makeParkId, parkFootprint } from "./parks";
 import { DateTime } from "luxon";
 import { daysFor, isKnownBuild } from "./buildCatalog";
 
@@ -313,19 +307,12 @@ export function isFirstDayGrace(
 // findEmptyTiles — dimension-agnostic, mirrors Python `_find_empty_tiles`
 // ---------------------------------------------------------------------------
 
-export function findEmptyTiles(
-  cityMap: CityMap,
-  parks?: Park[] | null,
-): number[][] {
-  // Park cells read as empty in `city_map` BY DESIGN — parks are recorded
-  // outside it — so anything choosing where a building lands has to subtract
-  // them here or a house drops onto the lawn.
-  const taken = parkCellKeys(parks);
+export function findEmptyTiles(cityMap: CityMap): number[][] {
   const tiles: number[][] = [];
   for (const [rStr, row] of Object.entries(cityMap)) {
     const r = parseInt(rStr, 10);
     for (let c = 0; c < row.length; c++) {
-      if ((row[c] === null || row[c] === "rubble") && !taken.has(`${r},${c}`)) {
+      if (row[c] === null || row[c] === "rubble") {
         tiles.push([r, c]);
       }
     }
@@ -524,39 +511,29 @@ export function processEndOfDay(params: {
         const footprint = parkFootprint(currentBuild.type);
 
         if (footprint) {
-          // A park doesn't take a tile, it takes a REGION — and it's recorded
-          // beside `city_map`, not in it, so slot indices and the buildings
-          // count stay correct (see parks.ts).
-          const cells = allocateParkRegion(
-            cityMap,
-            parks,
-            footprint.rows,
-            footprint.cols,
-          );
-          if (cells) {
-            const park: Park = {
-              park_id: makeParkId(),
-              cells,
-              damage: {},
-              built_on: processingDate,
-            };
-            updates.parks = [...parks, park];
-            updates.pending_event = {
-              event_id: makeEventId(),
-              type: "build_complete",
-              building: currentBuild.type,
-              tile: [cells[0].row, cells[0].col],
-              timestamp: nowIso,
-            };
-            freezes = Math.min(FREEZE_CAP, freezes + 1);
-          }
-          // No room for the footprint → the build simply doesn't land this
-          // pass. Deliberately NOT dropped: clearing current_build here would
-          // spend the crew's whole streak on nothing.
-          if (cells) updates.current_build = null;
+          // A park takes no `city_map` cell at all — it's recorded beside the
+          // grid so slot indices and the buildings count stay correct, and the
+          // CLIENT places it, because only the client knows the block plan
+          // that turns slots into positions (see parks.ts).
+          const park: Park = {
+            park_id: makeParkId(),
+            cells: (footprint.rows * footprint.cols) as 9 | 15,
+            damage: {},
+            built_on: processingDate,
+          };
+          updates.parks = [...parks, park];
+          updates.pending_event = {
+            event_id: makeEventId(),
+            type: "build_complete",
+            building: currentBuild.type,
+            tile: [0, 0],
+            timestamp: nowIso,
+          };
+          freezes = Math.min(FREEZE_CAP, freezes + 1);
+          updates.current_build = null;
         } else {
         // Building complete — place on random empty/rubble tile
-        const empty = findEmptyTiles(cityMap, parks);
+        const empty = findEmptyTiles(cityMap);
         if (empty.length > 0) {
           const newMap: CityMap = Object.fromEntries(
             Object.entries(cityMap).map(([k, row]) => [k, [...row]]),

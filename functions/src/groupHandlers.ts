@@ -524,8 +524,7 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
     }
 
     // Check if city is full
-    const hasEmpty =
-      findEmptyTiles(freshData.city_map, normalizeParks(freshData.parks)).length > 0;
+    const hasEmpty = findEmptyTiles(freshData.city_map).length > 0;
     if (!hasEmpty) {
       throw new HttpsError("failed-precondition", "City is full — no empty tiles");
     }
