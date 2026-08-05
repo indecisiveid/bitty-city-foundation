@@ -12,6 +12,7 @@ import {
   applyBuildRescue,
   isFirstDayGrace,
   findEmptyTiles,
+  findOccupiedTiles,
   STARTING_FREEZES,
 } from "./gameLogic";
 import {
@@ -63,6 +64,30 @@ function lastActivityFallback(
   if (!iso) return null;
   const dt = DateTime.fromISO(iso).setZone(tz);
   return dt.isValid ? dt.toISODate() : iso.slice(0, 10);
+}
+
+/**
+ * Stamp the city's plan anchor exactly once.
+ *
+ * Compact block growth replaced a rule that grew the city as eight rays, and
+ * block positions are DERIVED from index — so switching rules would relocate
+ * buildings that are already standing. This records how many buildings existed
+ * at the moment of the switch; the client keeps every block up to that point
+ * exactly where it was and only places new ones by the new rule.
+ *
+ * Written once and never again. A city founded after this ships gets 0 at
+ * creation, so it is compact from its first procedural block.
+ */
+async function ensurePlanAnchor(
+  groupId: string,
+  data: FirebaseFirestore.DocumentData,
+): Promise<FirebaseFirestore.DocumentData> {
+  if (typeof data.plan_frozen_at_buildings === "number") return data;
+  const frozen = findOccupiedTiles(data.city_map ?? {}).length;
+  await db().collection("groups").doc(groupId).update({
+    plan_frozen_at_buildings: frozen,
+  });
+  return { ...data, plan_frozen_at_buildings: frozen };
 }
 
 async function maybeProcessDay(
@@ -208,6 +233,8 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           abandoned_build: null,
           city_map: EMPTY_CITY,
           parks: [],
+          // Founded after compact growth shipped, so nothing to freeze.
+          plan_frozen_at_buildings: 0,
           last_processed_date: null,
           pending_event: null,
           building_completions: [],
@@ -402,6 +429,8 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
 
   let data = snap.data()!;
   memberNameForUid(data, uid);
+
+  data = await ensurePlanAnchor(group_id, data);
 
   if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
     data = await maybeProcessDay(group_id, data);
