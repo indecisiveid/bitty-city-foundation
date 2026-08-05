@@ -3,6 +3,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { v4 as uuidv4 } from "uuid";
 import { DateTime } from "luxon";
+import { normalizeParks } from "./parks";
 import {
   needsDayProcessing,
   getProcessingDate,
@@ -81,6 +82,7 @@ async function maybeProcessDay(
     currentBuild: data.current_build ?? null,
     abandonedBuild: data.abandoned_build ?? null,
     cityMap: data.city_map,
+    parks: normalizeParks(data.parks),
     streak: data.streak,
     buildingCompletions: data.building_completions ?? [],
     processingDate,
@@ -205,6 +207,7 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           current_build: null,
           abandoned_build: null,
           city_map: EMPTY_CITY,
+          parks: [],
           last_processed_date: null,
           pending_event: null,
           building_completions: [],
@@ -521,7 +524,8 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
     }
 
     // Check if city is full
-    const hasEmpty = findEmptyTiles(freshData.city_map).length > 0;
+    const hasEmpty =
+      findEmptyTiles(freshData.city_map, normalizeParks(freshData.parks)).length > 0;
     if (!hasEmpty) {
       throw new HttpsError("failed-precondition", "City is full — no empty tiles");
     }

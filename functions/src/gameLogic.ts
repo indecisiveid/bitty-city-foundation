@@ -1,4 +1,11 @@
 import { v4 as uuidv4 } from "uuid";
+import {
+  Park,
+  allocateParkRegion,
+  makeParkId,
+  parkCellKeys,
+  parkFootprint,
+} from "./parks";
 import { DateTime } from "luxon";
 import { daysFor, isKnownBuild } from "./buildCatalog";
 
@@ -110,6 +117,8 @@ export interface GroupDoc {
   current_build: CurrentBuild | null;
   abandoned_build?: AbandonedBuild | null;
   city_map: CityMap;
+  /** Parks, recorded outside `city_map` — absent on cities that predate them. */
+  parks?: Park[] | null;
   last_processed_date: string | null;
   pending_event: PendingEvent | null;
   building_completions: string[];
@@ -124,6 +133,7 @@ export interface GroupDoc {
 export interface EndOfDayUpdates {
   completions_today: string[];
   city_map?: CityMap;
+  parks?: Park[];
   current_build?: CurrentBuild | null;
   abandoned_build?: AbandonedBuild | null;
   streak?: number;
@@ -303,12 +313,19 @@ export function isFirstDayGrace(
 // findEmptyTiles — dimension-agnostic, mirrors Python `_find_empty_tiles`
 // ---------------------------------------------------------------------------
 
-export function findEmptyTiles(cityMap: CityMap): number[][] {
+export function findEmptyTiles(
+  cityMap: CityMap,
+  parks?: Park[] | null,
+): number[][] {
+  // Park cells read as empty in `city_map` BY DESIGN — parks are recorded
+  // outside it — so anything choosing where a building lands has to subtract
+  // them here or a house drops onto the lawn.
+  const taken = parkCellKeys(parks);
   const tiles: number[][] = [];
   for (const [rStr, row] of Object.entries(cityMap)) {
     const r = parseInt(rStr, 10);
     for (let c = 0; c < row.length; c++) {
-      if (row[c] === null || row[c] === "rubble") {
+      if ((row[c] === null || row[c] === "rubble") && !taken.has(`${r},${c}`)) {
         tiles.push([r, c]);
       }
     }
@@ -433,6 +450,7 @@ export function processEndOfDay(params: {
   currentBuild: CurrentBuild | null;
   abandonedBuild?: AbandonedBuild | null;
   cityMap: CityMap;
+  parks?: Park[] | null;
   streak: number; // legacy param — recomputed below; kept for caller compat
   buildingCompletions: string[];
   processingDate: string;
@@ -450,6 +468,7 @@ export function processEndOfDay(params: {
     currentBuild,
     abandonedBuild = null,
     cityMap,
+    parks: parksIn = [],
     buildingCompletions,
     processingDate,
     lastActivityDate = null,
@@ -464,6 +483,7 @@ export function processEndOfDay(params: {
   const updates: EndOfDayUpdates = {
     completions_today: [],
   };
+  const parks: Park[] = parksIn ?? [];
 
   const nowIso = new Date().toISOString();
 
@@ -501,8 +521,42 @@ export function processEndOfDay(params: {
       const newDays = currentBuild.days_completed + 1;
 
       if (newDays >= currentBuild.days_required) {
+        const footprint = parkFootprint(currentBuild.type);
+
+        if (footprint) {
+          // A park doesn't take a tile, it takes a REGION — and it's recorded
+          // beside `city_map`, not in it, so slot indices and the buildings
+          // count stay correct (see parks.ts).
+          const cells = allocateParkRegion(
+            cityMap,
+            parks,
+            footprint.rows,
+            footprint.cols,
+          );
+          if (cells) {
+            const park: Park = {
+              park_id: makeParkId(),
+              cells,
+              damage: {},
+              built_on: processingDate,
+            };
+            updates.parks = [...parks, park];
+            updates.pending_event = {
+              event_id: makeEventId(),
+              type: "build_complete",
+              building: currentBuild.type,
+              tile: [cells[0].row, cells[0].col],
+              timestamp: nowIso,
+            };
+            freezes = Math.min(FREEZE_CAP, freezes + 1);
+          }
+          // No room for the footprint → the build simply doesn't land this
+          // pass. Deliberately NOT dropped: clearing current_build here would
+          // spend the crew's whole streak on nothing.
+          if (cells) updates.current_build = null;
+        } else {
         // Building complete — place on random empty/rubble tile
-        const empty = findEmptyTiles(cityMap);
+        const empty = findEmptyTiles(cityMap, parks);
         if (empty.length > 0) {
           const newMap: CityMap = Object.fromEntries(
             Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
@@ -523,6 +577,7 @@ export function processEndOfDay(params: {
           freezes = Math.min(FREEZE_CAP, freezes + 1);
         }
         updates.current_build = null;
+        }
       } else {
         // Build advances
         updates.current_build = {
