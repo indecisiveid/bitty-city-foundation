@@ -168,6 +168,28 @@ function emptyMap(rows = 3, cols = 3): CityMap {
   );
 }
 
+/**
+ * The same city, built with a CATALOG id rather than the legacy `"house"`.
+ *
+ * Every destruction fixture in this file used `"house"`, which meant the whole
+ * consequence system was only ever tested against the v1.0 vocabulary. When
+ * `findOccupiedTiles` keyed on three hard-coded legacy names, a city built
+ * with catalog ids reported zero occupied tiles and was silently IMMUNE to
+ * both the asteroid and the meteor — and no test noticed, because no test
+ * used a catalog id. That is the shape of bug this fixture exists to catch.
+ */
+function mapWithCatalogBuilds(count: number, type = "house_a"): CityMap {
+  const m = emptyMap();
+  let placed = 0;
+  for (let r = 0; r < 3 && placed < count; r++) {
+    for (let c = 0; c < 3 && placed < count; c++) {
+      m[String(r)][c] = type;
+      placed++;
+    }
+  }
+  return m;
+}
+
 function mapWithHouses(count: number): CityMap {
   const m = emptyMap();
   let placed = 0;
@@ -595,6 +617,34 @@ describe("processEndOfDay — 7-day inactivity meteor", () => {
     expect(updates.last_inactivity_meteor_date).toBe(TODAY);
     const remaining = findOccupiedTiles(updates.city_map!);
     expect(remaining.length).toBe(7);
+  });
+
+  it("destroys a city built with catalog ids, not just legacy ones", () => {
+    // Guards the regression that made the consequence system inert: with
+    // `findOccupiedTiles` keyed on the three v1.0 names, this city looked
+    // empty to the server and nothing could be destroyed. The city LOOKS full
+    // in the app either way, so the failure is invisible until someone misses
+    // a week and nothing happens.
+    const updates = processEndOfDay(
+      baseParams({
+        cityMap: mapWithCatalogBuilds(9),
+        lastActivityDate: "2026-04-27",
+      }),
+    );
+    expect(updates.pending_event?.type).toBe("asteroid");
+    expect(updates.pending_event?.tiles_destroyed?.length).toBe(2);
+    expect(findOccupiedTiles(updates.city_map!).length).toBe(7);
+  });
+
+  it("counts every catalog id as occupied, tower or cottage", () => {
+    // One id per tier, so a catalog entry added without teaching
+    // `findOccupiedTiles` about it fails here rather than in production.
+    for (const type of [
+      "house_a", "apartment_c", "tenement_g", "highrise_h",
+      "skyscraper_slim", "skyscraper_twin",
+    ]) {
+      expect(findOccupiedTiles(mapWithCatalogBuilds(4, type)).length).toBe(4);
+    }
   });
 
   it("does not fire before 7 idle days", () => {
