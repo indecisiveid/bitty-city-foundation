@@ -5,12 +5,20 @@ import {
   findEmptyTiles,
   findOccupiedTiles,
   getProcessingDate,
+  INACTIVITY_METEOR_DAYS,
 } from "./gameLogic";
 import { EMPTY_CITY, GRID_ROWS, GRID_COLS, groupToResponse } from "./utils";
 import { requireDemoAccess } from "./auth";
 import { buildableIds } from "./buildCatalog";
 
 const db = () => getFirestore();
+
+/** `YYYY-MM-DD`, `n` days before the given date. */
+function daysBefore(date: string, n: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
 
 // --- demoAsteroid ---
 
@@ -60,8 +68,22 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
     streakFreezes: data.streak_freezes ?? 0,
     frozenDates: data.frozen_dates ?? [],
     brokenStreak: data.broken_streak ?? null,
-    lastActivityDate: data.last_activity_date ?? null,
-    lastInactivityMeteorDate: data.last_inactivity_meteor_date ?? null,
+    // Backdate activity so the INACTIVITY METEOR fires.
+    //
+    // This control used to pass the group's real `last_activity_date`, which
+    // made it simulate a missed DAY — and under the current rules a missed day
+    // deliberately destroys nothing ("falling rocks are reserved for real
+    // abandonment"; the build is parked for rescue instead). So the callable
+    // succeeded, wrote an update, and correctly changed nothing: a spinner,
+    // a closing sheet, and an untouched city. It read as a dead button for
+    // weeks.
+    //
+    // The meteor is the ONLY thing that destroys standing buildings, so a dev
+    // control whose whole job is "show me the city being destroyed" has to
+    // drive that path. Both fields are forced: the date to clear the 7-day
+    // idle threshold, and the throttle to null so a second press works.
+    lastActivityDate: daysBefore(processingDate, INACTIVITY_METEOR_DAYS),
+    lastInactivityMeteorDate: null,
     tileBuildDates: data.tile_build_dates ?? {},
     // Deliberately no grace day: the whole point of the dev tool is to
     // force a strike on demand.
