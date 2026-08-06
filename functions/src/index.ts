@@ -16,7 +16,7 @@ export {
   deleteAccount,
 } from "./groupHandlers";
 
-export { demoAsteroid, demoFillCity, demoSetBuildings, demoResetCity } from "./demoHandlers";
+export { demoAsteroid, demoFillCity, demoSetBuildings, demoResetCity, demoShowcaseCity } from "./demoHandlers";
 
 export { registerPushToken, unregisterPushToken, sendTestPush } from "./notificationHandlers";
 

@@ -197,6 +197,101 @@ export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request
   return groupToResponse(group_id, updatedSnap.data()!);
 });
 
+// --- demoShowcaseCity ---
+//
+// Stages the screenshot city: one of every build, both park sizes, a two-week
+// streak. It exists on the SERVER on purpose.
+//
+// The app had this as a local-only override, which made the city look full
+// while `city_map` was still empty. Every server-backed dev tool then failed on
+// it for reasons the screen flatly contradicted — `demoAsteroid` returning
+// "No buildings on the map to destroy" against a skyline full of buildings is
+// the one that cost an afternoon. A demo city you cannot then strike, fill or
+// process is only half a fixture.
+
+const SHOWCASE_BUILDS = [
+  // One of each, so every model in the catalog is on screen somewhere...
+  "house_a", "house_b",
+  "apartment_c", "apartment_d", "apartment_e", "apartment_f",
+  "tenement_g", "highrise_h",
+  "skyscraper_slim", "skyscraper_twin",
+  // ...then weighted the way a real city grows: lots of small stuff, few towers.
+  "house_a", "house_b", "apartment_e", "apartment_f",
+  "house_a", "apartment_c", "house_b", "apartment_d",
+  "house_a", "apartment_e", "house_b", "tenement_g",
+  "house_a", "apartment_f", "house_b", "highrise_h",
+  "apartment_c", "house_a", "apartment_d", "house_b",
+];
+
+export const demoShowcaseCity = onCall({ enforceAppCheck: true }, async (request) => {
+  requireDemoAccess(request);
+  const { group_id } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  const newMap = Object.fromEntries(
+    Object.entries(EMPTY_CITY).map(([k, row]) => [k, [...row]]),
+  );
+  const buildDates: Record<string, string> = {};
+  const today = new Date();
+  const dayBefore = (n: number) => {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - n);
+    return d.toISOString().slice(0, 10);
+  };
+
+  SHOWCASE_BUILDS.slice(0, GRID_ROWS * GRID_COLS).forEach((type, i) => {
+    const r = Math.floor(i / GRID_COLS);
+    const c = i % GRID_COLS;
+    newMap[String(r)][c] = type;
+    buildDates[`${r},${c}`] = dayBefore(i);
+  });
+
+  // Fourteen consecutive all-complete days ending today — the streak the
+  // header shows, derived rather than asserted, so it survives a day-process.
+  const completions = Array.from({ length: 14 }, (_, i) => dayBefore(13 - i));
+
+  await groupRef.update({
+    city_map: newMap,
+    tile_build_dates: buildDates,
+    // Anchored to the block sequence, not to coordinates — see parks.ts.
+    parks: [
+      {
+        park_id: "showcase_small", cells: 9, built_at_buildings: 12,
+        damage: {}, built_on: dayBefore(3),
+      },
+      {
+        park_id: "showcase_large", cells: 15, built_at_buildings: 22,
+        damage: {}, built_on: dayBefore(1),
+      },
+    ],
+    building_completions: completions,
+    last_activity_date: completions[completions.length - 1],
+    streak: 14,
+    streak_freezes: 3,
+    frozen_dates: [],
+    broken_streak: null,
+    // 0 = plan this city compactly from its first procedural block. A showcase
+    // frozen into the old ray plan would be the star-shaped city the compact
+    // growth work exists to replace.
+    plan_frozen_at_buildings: 0,
+    current_build: null,
+    pending_event: null,
+    completions_today: [],
+  });
+
+  const updatedSnap = await groupRef.get();
+  return groupToResponse(group_id, updatedSnap.data()!);
+});
+
 // --- demoResetCity ---
 // Equivalent to demoSetBuildings with count = 0.
 
