@@ -319,6 +319,70 @@ export function isFirstDayGrace(
   return boundary.diff(created, "hours").hours < 24;
 }
 
+
+// ---------------------------------------------------------------------------
+// Park damage — a park is hit as ONE unit, but damaged in PART
+// ---------------------------------------------------------------------------
+//
+// A park counts as one build however many cells it covers, so it enters the
+// meteor's lottery once, weighted by its day cost like everything else. But
+// flattening nine or fifteen cells for a single hit would make one unlucky
+// roll cost more than a week of work, so a hit scorches a FRACTION of the
+// park instead — the same 20% the meteor takes off the city as a whole.
+//
+// That is also why parks could not simply be added to the tile pool: a
+// 15-cell park would then attract fifteen times a house's attention and be
+// obliterated long before the neighbourhood around it.
+
+/** Footprint for a park's cell count. Both are three deep. */
+function parkShape(cells: number): { rows: number; cols: number } {
+  return cells === 15 ? { rows: 3, cols: 5 } : { rows: 3, cols: 3 };
+}
+
+/** The catalog id behind a park's footprint, for day-cost weighting. */
+function parkTypeForCells(cells: number): string {
+  return cells === 15 ? "park_large" : "park_small";
+}
+
+export const PARK_DAMAGE_FRACTION = 0.2;
+
+/**
+ * Damage one park. Intact cells are scorched first (level 1); once the whole
+ * park is scorched, further hits crater what is already burnt (level 2).
+ *
+ * Deterministic in COUNT but not in placement — the cells are chosen by the
+ * same weighted draw the rest of destruction uses, so two crews never lose
+ * the identical corner.
+ */
+export function damagePark(
+  cells: number,
+  damage: Record<string, 1 | 2>,
+): Record<string, 1 | 2> {
+  const { rows, cols } = parkShape(cells);
+  const total = rows * cols;
+  const nHit = Math.max(1, Math.ceil(total * PARK_DAMAGE_FRACTION));
+
+  const intact: string[] = [];
+  const scorched: string[] = [];
+  for (let i = 0; i < total; i++) {
+    const key = String(i);
+    if (damage[key] === undefined) intact.push(key);
+    else if (damage[key] === 1) scorched.push(key);
+  }
+
+  const next: Record<string, 1 | 2> = { ...damage };
+  // Escalate only once nothing is left to scorch, so damage spreads across
+  // the park before it deepens anywhere.
+  const pool = intact.length > 0 ? intact : scorched;
+  const level: 1 | 2 = intact.length > 0 ? 1 : 2;
+  for (let i = 0; i < nHit && pool.length > 0; i++) {
+    const idx = Math.floor(Math.random() * pool.length);
+    next[pool[idx]] = level;
+    pool.splice(idx, 1);
+  }
+  return next;
+}
+
 // ---------------------------------------------------------------------------
 // findEmptyTiles — dimension-agnostic, mirrors Python `_find_empty_tiles`
 // ---------------------------------------------------------------------------
@@ -651,12 +715,56 @@ export function processEndOfDay(params: {
   if (meteorDue) {
     const mapNow = updates.city_map ?? cityMap;
     const occupied = findOccupiedTiles(mapNow);
-    if (occupied.length > 0) {
+    // Parks are part of the city, so they count toward "20% of what you
+    // built" and can absorb hits. Leaving them out made a crew that built
+    // parks strictly harder to hurt — the more green space, the less there
+    // was to lose, which inverts the whole risk the game runs on.
+    const builds = occupied.length + parks.length;
+    if (builds > 0) {
       const nDestroy = Math.min(
         INACTIVITY_DESTROY_MAX,
-        Math.max(1, Math.ceil(occupied.length * INACTIVITY_DESTROY_FRACTION)),
+        Math.max(1, Math.ceil(builds * INACTIVITY_DESTROY_FRACTION)),
       );
-      const { map, tiles, origins } = destroyBuildings(mapNow, nDestroy);
+      // One lottery over both, so a hit lands on whatever it lands on. A park
+      // enters ONCE (weighted by its day cost, like any build) and is damaged
+      // in part when picked — see `damagePark`.
+      const parkPicks = new Set<string>();
+      const parkEntries = parks.map((pk) => ({
+        parkId: pk.park_id,
+        weight: destroyWeight(parkTypeForCells(pk.cells)),
+      }));
+      const tileWeight = occupied.reduce((a, t) => a + destroyWeight(t.type), 0);
+      const parkWeight = parkEntries.reduce((a, e) => a + e.weight, 0);
+      // How many of the N hits land on parks, in expectation. Resolved up
+      // front so the tile draw below stays exactly what it was.
+      let parkHits = 0;
+      for (let i = 0; i < nDestroy; i++) {
+        if (parkWeight > 0 && Math.random() * (tileWeight + parkWeight) >= tileWeight) {
+          parkHits++;
+        }
+      }
+      const remainingParks = [...parkEntries];
+      for (let i = 0; i < parkHits && remainingParks.length > 0; i++) {
+        const total = remainingParks.reduce((a, e) => a + e.weight, 0);
+        let r = Math.random() * total;
+        let idx = 0;
+        for (; idx < remainingParks.length; idx++) {
+          r -= remainingParks[idx].weight;
+          if (r <= 0) break;
+        }
+        const chosen = remainingParks[Math.min(idx, remainingParks.length - 1)];
+        parkPicks.add(chosen.parkId);
+        remainingParks.splice(remainingParks.indexOf(chosen), 1);
+      }
+      if (parkPicks.size > 0) {
+        updates.parks = parks.map((pk) =>
+          parkPicks.has(pk.park_id)
+            ? { ...pk, damage: damagePark(pk.cells, pk.damage ?? {}) }
+            : pk,
+        );
+      }
+      const nTiles = Math.max(0, nDestroy - parkHits);
+      const { map, tiles, origins } = destroyBuildings(mapNow, nTiles);
       updates.city_map = map;
       // Remember what stood on each levelled lot so it can be rebuilt. Merged
       // over any existing ledger: earlier ruins stay repairable.

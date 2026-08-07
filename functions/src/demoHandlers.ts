@@ -10,6 +10,7 @@ import {
 import { EMPTY_CITY, GRID_ROWS, GRID_COLS, groupToResponse } from "./utils";
 import { requireDemoAccess } from "./auth";
 import { buildableIds } from "./buildCatalog";
+import { normalizeParks } from "./parks";
 
 const db = () => getFirestore();
 
@@ -60,6 +61,10 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
     completionsToday: [], // empty = failed day = asteroid
     currentBuild,
     cityMap,
+    // Without this the strike sees a city with no parks, so it can never
+    // damage one — the dev tool would report parks as immune even after
+    // the rule that damages them shipped.
+    parks: normalizeParks(data.parks),
     streak: data.streak,
     buildingCompletions: data.building_completions ?? [],
     processingDate,
