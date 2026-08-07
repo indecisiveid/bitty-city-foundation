@@ -120,6 +120,7 @@ async function maybeProcessDay(
       ? isFirstDayGrace(createdIso, processingDate, data.goal_reset_time, goalResetTimezone)
       : false,
     tileBuildDates: data.tile_build_dates ?? {},
+    rubbleOrigins: data.rubble_origins ?? {},
   });
 
   const writeUpdates: Record<string, unknown> = {
@@ -584,6 +585,109 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
         body: `${pickerName} picked ${withArticle(label)} for ${finalData!.group_name ?? "your city"}. ${span}`,
       },
       pickerName,
+    );
+  }
+
+  return groupToResponse(group_id, finalData!);
+});
+
+// --- repairTile ---
+//
+// Rebuild what a meteor levelled, on the lot where it stood.
+//
+// The rules are the ordinary build rules, deliberately: a repair costs the
+// same days the original type costs, occupies the single build slot, and
+// lands when the crew completes those days. Rebuilding is not a discount for
+// having been hit — it is the same work, aimed at a specific ruin.
+//
+// Transactional for the same reason `selectBuild` is: two members tapping two
+// different ruins at once must not both open a build.
+
+export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const { group_id, row, col } = request.data;
+
+  if (!group_id || typeof row !== "number" || typeof col !== "number") {
+    throw new HttpsError(
+      "invalid-argument",
+      "group_id, row and col are required",
+    );
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  let data = snap.data()!;
+  memberNameForUid(data, uid);
+
+  // Settle any outstanding days first: a ruin might be about to be rebuilt by
+  // a build that is already landing, and the repair must see that.
+  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
+    data = await maybeProcessDay(group_id, data);
+  }
+
+  let finalData: FirebaseFirestore.DocumentData;
+  let repairerName: string | null = null;
+  let repairedType = "";
+
+  await db().runTransaction(async (tx) => {
+    const freshSnap = await tx.get(groupRef);
+    const freshData = freshSnap.data()!;
+    const member = memberNameForUid(freshData, uid);
+
+    if (freshData.current_build != null) {
+      throw new HttpsError("failed-precondition", "A build is already in progress");
+    }
+
+    const cell = freshData.city_map?.[String(row)]?.[col];
+    if (cell !== "rubble") {
+      throw new HttpsError("failed-precondition", "That lot is not rubble");
+    }
+
+    // The ledger is the only record of what stood here — the cell itself was
+    // overwritten when it was destroyed. A city levelled before the ledger
+    // existed has no entry, so there is nothing to restore.
+    const origins: Record<string, string> = freshData.rubble_origins ?? {};
+    const type = origins[`${row},${col}`];
+    if (!type || !daysFor(type)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "No record of what stood here, so it can't be rebuilt",
+      );
+    }
+
+    const newBuild = {
+      type,
+      days_required: daysFor(type)!,
+      days_completed: 0,
+      target_tile: { row, col },
+    };
+
+    // A repair gives up any stalled build still on offer, exactly as picking
+    // a new build does — there is only ever one build slot.
+    tx.update(groupRef, { current_build: newBuild, abandoned_build: null });
+    finalData = { ...freshData, current_build: newBuild, abandoned_build: null };
+    repairerName = member;
+    repairedType = type;
+  });
+
+  if (repairerName) {
+    const label = labelFor(repairedType);
+    const days: number = daysFor(repairedType)!;
+    const span = days === 1
+      ? "Today's goal rebuilds it."
+      : `It takes ${days} days of everyone completing their goal.`;
+    await notifyAllMembers(
+      group_id,
+      finalData!,
+      {
+        title: `🧱 Rebuilding ${withArticle(label)}`,
+        body: `${repairerName} is putting ${withArticle(label)} back up in ${finalData!.group_name ?? "your city"}. ${span}`,
+      },
+      repairerName,
     );
   }
 

@@ -602,6 +602,89 @@ describe("processEndOfDay — tile build dates", () => {
   });
 });
 
+describe("processEndOfDay — repairs land on their own lot", () => {
+  /** A 3x3 city with one levelled lot at (1,1). */
+  function cityWithRuin(): CityMap {
+    const m = mapWithCatalogBuilds(9);
+    m["1"][1] = "rubble";
+    return m;
+  }
+
+  it("puts the rebuilt building back where it stood", () => {
+    // The entire promise of tapping a ruin. A repair that landed anywhere
+    // else would be an ordinary build wearing a repair's name.
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        cityMap: cityWithRuin(),
+        currentBuild: {
+          type: "house_a",
+          days_required: 1,
+          days_completed: 0,
+          target_tile: { row: 1, col: 1 },
+        },
+      }),
+    );
+    expect(updates.city_map!["1"][1]).toBe("house_a");
+    expect(updates.pending_event?.tile).toEqual([1, 1]);
+  });
+
+  it("clears the ledger entry once the lot is rebuilt", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        cityMap: cityWithRuin(),
+        rubbleOrigins: { "1,1": "house_a", "2,2": "house_b" },
+        currentBuild: {
+          type: "house_a",
+          days_required: 1,
+          days_completed: 0,
+          target_tile: { row: 1, col: 1 },
+        },
+      }),
+    );
+    // Rebuilt, so no longer a ruin awaiting repair...
+    expect(updates.rubble_origins?.["1,1"]).toBeUndefined();
+    // ...but the untouched ruin stays repairable.
+    expect(updates.rubble_origins?.["2,2"]).toBe("house_b");
+  });
+
+  it("still lands somewhere when the target got built on meanwhile", () => {
+    // Two members could repair and pick in the same window. Dropping the
+    // build entirely would be the worst outcome — a week of goals for
+    // nothing — so it falls back to an ordinary landing.
+    const full = mapWithCatalogBuilds(9); // (1,1) is occupied, not rubble
+    full["0"][0] = "rubble";              // somewhere else to land
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        cityMap: full,
+        currentBuild: {
+          type: "house_b",
+          days_required: 1,
+          days_completed: 0,
+          target_tile: { row: 1, col: 1 },
+        },
+      }),
+    );
+    expect(updates.city_map!["0"][0]).toBe("house_b");
+    expect(updates.city_map!["1"][1]).toBe("house_a"); // untouched
+  });
+
+  it("leaves an ordinary build's placement alone", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        cityMap: cityWithRuin(),
+        currentBuild: { type: "house_b", days_required: 1, days_completed: 0 },
+      }),
+    );
+    // Only one free cell in this fixture, so a no-target build takes it —
+    // proving the target path is not required for a landing.
+    expect(updates.city_map!["1"][1]).toBe("house_b");
+  });
+});
+
 describe("processEndOfDay — 7-day inactivity meteor", () => {
   it("fires after 7 idle days even with no active build", () => {
     const updates = processEndOfDay(
@@ -645,6 +728,37 @@ describe("processEndOfDay — 7-day inactivity meteor", () => {
     ]) {
       expect(findOccupiedTiles(mapWithCatalogBuilds(4, type)).length).toBe(4);
     }
+  });
+
+  it("records what stood on each levelled lot, so it can be rebuilt", () => {
+    // The cell itself is overwritten with "rubble", so this ledger is the
+    // ONLY surviving record of the original type. Without it "rebuild what
+    // was here" has nothing to rebuild.
+    const updates = processEndOfDay(
+      baseParams({
+        cityMap: mapWithCatalogBuilds(9, "apartment_c"),
+        lastActivityDate: "2026-04-27",
+      }),
+    );
+    const destroyed = updates.pending_event?.tiles_destroyed ?? [];
+    expect(destroyed.length).toBe(2);
+    for (const { row, col } of destroyed) {
+      expect(updates.rubble_origins?.[`${row},${col}`]).toBe("apartment_c");
+      expect(updates.city_map![String(row)][col]).toBe("rubble");
+    }
+  });
+
+  it("keeps earlier ruins repairable when a second meteor lands", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        cityMap: mapWithCatalogBuilds(9),
+        lastActivityDate: "2026-04-27",
+        rubbleOrigins: { "9,9": "skyscraper_slim" },
+      }),
+    );
+    // Merged, not replaced — an old ruin does not stop being repairable
+    // because a new one appeared.
+    expect(updates.rubble_origins?.["9,9"]).toBe("skyscraper_slim");
   });
 
   it("does not fire before 7 idle days", () => {

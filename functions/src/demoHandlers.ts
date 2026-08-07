@@ -85,6 +85,9 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
     lastActivityDate: daysBefore(processingDate, INACTIVITY_METEOR_DAYS),
     lastInactivityMeteorDate: null,
     tileBuildDates: data.tile_build_dates ?? {},
+    // Pass the ledger through, or a demo strike would drop every earlier
+    // ruin's origin and quietly make those lots unrepairable.
+    rubbleOrigins: data.rubble_origins ?? {},
     // Deliberately no grace day: the whole point of the dev tool is to
     // force a strike on demand.
   });

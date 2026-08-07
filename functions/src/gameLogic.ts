@@ -58,6 +58,14 @@ export interface CurrentBuild {
   type: string;
   days_required: number;
   days_completed: number;
+  /**
+   * Land this build on THIS lot instead of a random one.
+   *
+   * Set only by a repair: the whole promise of tapping a ruin is that the
+   * building comes back where it stood. An ordinary build leaves this unset
+   * and still lands wherever the city has room.
+   */
+  target_tile?: { row: number; col: number };
 }
 
 export interface PendingEvent {
@@ -138,6 +146,14 @@ export interface EndOfDayUpdates {
   pending_event?: PendingEvent;
   building_completions?: string[];
   tile_build_dates?: Record<string, string>;
+  /**
+   * "row,col" → the build id that stood there before it was levelled.
+   *
+   * Destruction overwrites the cell with `"rubble"`, so without this ledger
+   * the original type is simply gone and "rebuild what was here" has nothing
+   * to rebuild. Cleared for a cell once something stands on it again.
+   */
+  rubble_origins?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +385,12 @@ function weightedChoice<T>(items: T[], weights: number[]): T {
 function destroyBuildings(
   cityMap: CityMap,
   count: number,
-): { map: CityMap; tiles: Array<{ row: number; col: number }> } {
+): {
+  map: CityMap;
+  tiles: Array<{ row: number; col: number }>;
+  /** "row,col" → the type that stood there, so a repair can restore it. */
+  origins: Record<string, string>;
+} {
   const occupied = findOccupiedTiles(cityMap);
   const remaining = [...occupied];
   const remainingWeights = remaining.map((t) => destroyWeight(t.type));
@@ -389,10 +410,17 @@ function destroyBuildings(
   const newMap: CityMap = Object.fromEntries(
     Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
   );
+  // Record the type BEFORE overwriting it — this is the only moment it still
+  // exists. `newMap[row][col] = "rubble"` is otherwise a one-way door.
+  const origins: Record<string, string> = {};
   for (const { row, col } of picked) {
+    const was = newMap[row][col];
+    if (typeof was === "string" && was !== "rubble") {
+      origins[`${row},${col}`] = was;
+    }
     newMap[row][col] = "rubble";
   }
-  return { map: newMap, tiles: picked };
+  return { map: newMap, tiles: picked, origins };
 }
 
 function makeEventId(): string {
@@ -448,6 +476,8 @@ export function processEndOfDay(params: {
   lastInactivityMeteorDate?: string | null;
   isGraceDay?: boolean;
   tileBuildDates?: Record<string, string>;
+  /** "row,col" → the type levelled there, for repairs. */
+  rubbleOrigins?: Record<string, string>;
 }): EndOfDayUpdates {
   const {
     groupMembers,
@@ -465,6 +495,7 @@ export function processEndOfDay(params: {
     lastInactivityMeteorDate = null,
     isGraceDay = false,
     tileBuildDates = {},
+    rubbleOrigins = {},
   } = params;
 
   const updates: EndOfDayUpdates = {
@@ -535,17 +566,34 @@ export function processEndOfDay(params: {
           freezes = Math.min(FREEZE_CAP, freezes + 1);
           updates.current_build = null;
         } else {
-        // Building complete — place on random empty/rubble tile
+        // Building complete — place on the repair's own lot if it has one,
+        // otherwise a random empty/rubble tile. A repair that landed anywhere
+        // else would break the only promise tapping a ruin makes.
         const empty = findEmptyTiles(cityMap);
+        const target = currentBuild.target_tile;
+        const targetFree =
+          target != null &&
+          empty.some(([r, c]) => r === target.row && c === target.col);
         if (empty.length > 0) {
           const newMap: CityMap = Object.fromEntries(
             Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
           );
-          const tile = empty[Math.floor(Math.random() * empty.length)];
+          // If the target got built on while the repair was in flight, fall
+          // back to a normal landing rather than dropping the build.
+          const tile = targetFree
+            ? [target!.row, target!.col]
+            : empty[Math.floor(Math.random() * empty.length)];
           newMap[tile[0]][tile[1]] = currentBuild.type;
           updates.city_map = newMap;
           newBuildDates[`${tile[0]},${tile[1]}`] = processingDate;
           buildDatesChanged = true;
+          // Something stands here again, so the lot is no longer a ruin
+          // awaiting repair — drop it from the ledger.
+          if (rubbleOrigins[`${tile[0]},${tile[1]}`] !== undefined) {
+            const next = { ...rubbleOrigins };
+            delete next[`${tile[0]},${tile[1]}`];
+            updates.rubble_origins = next;
+          }
           updates.pending_event = {
             event_id: makeEventId(),
             type: "build_complete",
@@ -608,8 +656,11 @@ export function processEndOfDay(params: {
         INACTIVITY_DESTROY_MAX,
         Math.max(1, Math.ceil(occupied.length * INACTIVITY_DESTROY_FRACTION)),
       );
-      const { map, tiles } = destroyBuildings(mapNow, nDestroy);
+      const { map, tiles, origins } = destroyBuildings(mapNow, nDestroy);
       updates.city_map = map;
+      // Remember what stood on each levelled lot so it can be rebuilt. Merged
+      // over any existing ledger: earlier ruins stay repairable.
+      updates.rubble_origins = { ...rubbleOrigins, ...origins };
       for (const t of tiles) {
         delete newBuildDates[`${t.row},${t.col}`];
         buildDatesChanged = true;
