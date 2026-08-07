@@ -26,6 +26,7 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
+import { joinedMessage, leftMessage } from "./crewMessages";
 import { NotificationCategory } from "./push";
 import { buildProgressOf, withArticle } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor } from "./buildCatalog";
@@ -289,6 +290,7 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
   const userRef = db().collection("users").doc(uid);
 
   let finalData: FirebaseFirestore.DocumentData;
+  let joinedName: string | null = null;
 
   await db().runTransaction(async (tx) => {
     const [groupSnap, userSnap] = await Promise.all([
@@ -345,6 +347,7 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
       { merge: true },
     );
 
+    joinedName = name;
     finalData = {
       ...data,
       group_members: [...members, name],
@@ -353,6 +356,25 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
   });
 
   finalData = await maybeProcessDay(groupId, finalData!);
+
+  // Tell the crew the bar just moved. Everyone except the person who joined —
+  // they already know, and they're looking at the city right now.
+  if (joinedName) {
+    const others = (finalData.group_members ?? []).filter(
+      (m: string) => m !== joinedName,
+    );
+    await notifyMembers(
+      groupId,
+      finalData,
+      others,
+      joinedMessage(
+        joinedName,
+        finalData.group_name ?? "your city",
+        (finalData.group_members ?? []).length,
+      ),
+    );
+  }
+
   return groupToResponse(groupId, finalData);
 });
 
@@ -838,6 +860,8 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
   const groupRef = db().collection("groups").doc(group_id);
   const userRef = db().collection("users").doc(uid);
 
+  let leftName: string | null = null;
+  let remaining: FirebaseFirestore.DocumentData | null = null;
   await db().runTransaction(async (tx) => {
     const groupSnap = await tx.get(groupRef);
     if (!groupSnap.exists) {
@@ -869,7 +893,34 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
       completions_today: newCompletions,
     });
     tx.set(userRef, { group_ids: FieldValue.arrayRemove(group_id) }, { merge: true });
+
+    leftName = name;
+    remaining = {
+      ...data,
+      group_members: newMembers,
+      member_uids: newUids,
+      completions_today: newCompletions,
+    };
   });
+
+  // Tell whoever is left that the bar moved. Notified with the POST-leave
+  // arrays, so the person who left is already out of the mapping and can't be
+  // sent a note about their own departure.
+  // Read through a const: TypeScript doesn't track assignments made inside the
+  // transaction callback, so `remaining` narrows to null without this.
+  const after = remaining as FirebaseFirestore.DocumentData | null;
+  if (leftName && after && (after.group_members ?? []).length > 0) {
+    await notifyMembers(
+      group_id,
+      after,
+      after.group_members,
+      leftMessage(
+        leftName,
+        after.group_name ?? "your city",
+        after.group_members.length,
+      ),
+    );
+  }
 
   return { success: true };
 });

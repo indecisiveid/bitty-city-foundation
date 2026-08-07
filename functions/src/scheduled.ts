@@ -13,6 +13,11 @@
  * collection, and deleteGroup removes the doc, so its scheduled notifications
  * simply cease to exist.
  *
+ * Sending is inverted at the end: pass 1 decides city by city and enrols
+ * recipients into a uid → cities map, pass 2 sends ONE consolidated push per
+ * person (see nudgeMessages.consolidate). Deciding stays per-city because
+ * timezone, streak and crew are per-city; only delivery is per-person.
+ *
  * Scope note: this scans every group each tick. Fine at launch scale; if the
  * group count grows large, precompute a `next_nudge_at` field and query on it
  * instead of scanning.
@@ -21,77 +26,31 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { DateTime } from "luxon";
 import { getProcessingDate, daysBetween } from "./gameLogic";
-import { decideNudge, Nudge, SlotId } from "./reminderLogic";
-import { notifyMembers, notifyAllMembers } from "./notify";
-import { buildProgressOf, BuildProgress } from "./buildings";
+import { decideNudge, SlotId } from "./reminderLogic";
+import { notifyUids, uidsForNames } from "./notify";
+import { buildProgressOf } from "./buildings";
+import { consolidate, NudgeEntry } from "./nudgeMessages";
+
+// Re-exported: the copy moved to nudgeMessages.ts, callers and tests did not.
+export { messageFor } from "./nudgeMessages";
 
 const db = () => getFirestore();
-
-interface MessageContext {
-  cityName: string;
-  streak: number;
-  build: BuildProgress | null;
-}
-
-/** Build the payload text for a decided nudge. */
-export function messageFor(nudge: Nudge, ctx: MessageContext) {
-  // The meteor outranks everything — it's the only one that costs buildings.
-  if (nudge.kind === "meteor") {
-    return {
-      title: "☄️ Meteor incoming",
-      body: `${ctx.cityName} hasn't been active in days — complete today's goal to stop the meteor.`,
-    };
-  }
-
-  // Every slot gets its own voice. Four pushes a day that all read "keep the
-  // streak alive" feels like a broken loop, so the day escalates instead:
-  // plan it → nudge → still open → last call. A test pins that no two slots
-  // in the same day can produce the same body.
-  const { cityName, streak, build } = ctx;
-  const onStreak = nudge.kind === "streak";
-  // The goal is always the thing to do; the streak is what's at stake. Keeping
-  // them in separate clauses avoids copy like "finish your 4-day streak".
-  const stake = (clause: string) => (onStreak ? ` ${clause}` : "");
-
-  switch (nudge.slot) {
-    case "morning":
-      // The morning slot sets up the day. On a multi-day build, say where we are.
-      if (build) {
-        const { dayNumber, daysRequired, label } = build;
-        return {
-          title: `🌅 Day ${dayNumber} of ${daysRequired}`,
-          body: `Today is Day ${dayNumber} of ${daysRequired}. Plan to complete your goal today to finish building your ${label}.`,
-        };
-      }
-      return {
-        title: "🌅 Good morning",
-        body: `Plan when you'll finish today's goal in ${cityName}.${stake(`Your ${streak}-day streak depends on it.`)}`,
-      };
-
-    case "midday":
-      return {
-        title: onStreak ? "🔥 Keep the streak alive" : "Bitty City",
-        body: `Don't forget today's goal in ${cityName}.${stake(`Your ${streak}-day streak is on the line.`)}`,
-      };
-
-    case "evening":
-      return {
-        title: onStreak ? "🔥 Streak still open" : "Bitty City",
-        body: `Today's goal in ${cityName} still isn't checked off.${stake(`Your ${streak}-day streak is riding on it.`)}`,
-      };
-
-    case "lastCall":
-    default:
-      return {
-        title: "⏳ Last call",
-        body: `The day's nearly done and today's goal in ${cityName} is still open.${stake(`Last chance to save your ${streak}-day streak.`)}`,
-      };
-  }
-}
 
 async function runNudges(): Promise<void> {
   const snap = await db().collection("groups").get();
 
+  // uid → every city that owes this person a nudge on this tick. Filled by the
+  // per-city pass below, drained by the per-person pass after it. This map is
+  // the whole point: without it each city sends on its own and a person in
+  // three cities gets three near-identical pushes.
+  const byUid = new Map<string, NudgeEntry[]>();
+  const add = (uid: string, entry: NudgeEntry) => {
+    const list = byUid.get(uid);
+    if (list) list.push(entry);
+    else byUid.set(uid, [entry]);
+  };
+
+  // --- Pass 1: decide, city by city. Claims each slot, sends nothing. -------
   await Promise.all(
     snap.docs.map(async (doc) => {
       const data = doc.data();
@@ -120,7 +79,8 @@ async function runNudges(): Promise<void> {
       if (!nudge) return;
 
       // Record the slot first so a retry of this run can't double-send. When
-      // the stored list belongs to an older game-date, start it fresh.
+      // the stored list belongs to an older game-date, start it fresh. This
+      // stays per-city: consolidation changes who receives, never who decides.
       const slotsForToday =
         sentDate === todayGameDate ? [...sentSlots, nudge.slot] : [nudge.slot];
       await doc.ref.update({
@@ -130,18 +90,45 @@ async function runNudges(): Promise<void> {
         last_reminder_date: FieldValue.delete(),
       });
 
-      const payload = messageFor(nudge, {
-        cityName: data.group_name ?? "your city",
+      const incomplete = members.filter((m) => !completions.includes(m));
+      const cityName = data.group_name ?? "your city";
+      const ctx = {
+        cityName,
         streak: data.streak ?? 0,
         build: buildProgressOf(data.current_build),
-      });
+        pendingNames: incomplete,
+      };
+      const base = { groupId: doc.id, cityName, nudge, ctx };
 
-      if (nudge.recipients === "all") {
-        await notifyAllMembers(doc.id, data, payload);
-      } else {
-        const incomplete = members.filter((m) => !completions.includes(m));
-        await notifyMembers(doc.id, data, incomplete, payload);
+      // The meteor is about the CITY, not about who owes what, so the whole
+      // crew is enrolled with the identical warning.
+      if (nudge.kind === "meteor") {
+        for (const uid of uidsForNames(data, members)) {
+          add(uid, { ...base, role: "pending" });
+        }
+        return;
       }
+
+      for (const uid of uidsForNames(data, incomplete)) {
+        add(uid, { ...base, role: "pending" });
+      }
+
+      // At last call the members who are DONE are enrolled too — they're the
+      // only ones who can still save the day by chasing whoever is late.
+      if (nudge.recipients === "all") {
+        const done = members.filter((m) => completions.includes(m));
+        for (const uid of uidsForNames(data, done)) {
+          add(uid, { ...base, role: "done" });
+        }
+      }
+    }),
+  );
+
+  // --- Pass 2: one push per person, however many cities they hold. ---------
+  await Promise.all(
+    [...byUid.entries()].map(async ([uid, entries]) => {
+      const payload = consolidate(entries);
+      if (payload) await notifyUids([uid], payload);
     }),
   );
 }

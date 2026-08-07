@@ -19,6 +19,21 @@
  * Each slot is sent at most once per game-day (`remindersSentSlots`, scoped to
  * `remindersSentDate`), and nobody is nudged once their crew is done.
  *
+ * WHO gets each slot differs, and that is the point of `recipients`:
+ *
+ *   morning / midday / evening → only the members who still haven't completed.
+ *                                Telling someone who is already done that the
+ *                                goal is open is just noise to them.
+ *   lastCall                   → EVERYONE. The people who are done are the
+ *                                only ones who can still save the day, by
+ *                                chasing whoever is holding it up, so the last
+ *                                slot addresses both sides. They get different
+ *                                copy (see `messageFor`): finish it vs chase
+ *                                them.
+ *
+ * A crew that is already complete is never nudged at all, so the last-call
+ * chaser can only reach someone whose crew genuinely still has a gap.
+ *
  * The message escalates by urgency:
  *
  *   meteor   → the 7-day inactivity meteor is one idle day away  → warn ALL
@@ -108,7 +123,12 @@ export function decideNudge(input: NudgeInput): Nudge | null {
     input.idleDays !== null && input.idleDays >= INACTIVITY_METEOR_DAYS - 1;
   if (meteorImminent) return { kind: "meteor", recipients: "all", slot };
 
-  if (input.streak > 0) return { kind: "streak", recipients: "incomplete", slot };
+  // Last call goes to the whole crew — the members who are done are the ones
+  // who can still chase the stragglers, and this is the last moment it can
+  // make a difference.
+  const recipients: Nudge["recipients"] = slot === "lastCall" ? "all" : "incomplete";
 
-  return { kind: "reminder", recipients: "incomplete", slot };
+  if (input.streak > 0) return { kind: "streak", recipients, slot };
+
+  return { kind: "reminder", recipients, slot };
 }

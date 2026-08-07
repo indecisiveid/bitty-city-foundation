@@ -17,7 +17,7 @@ export const EMPTY_CITY: Record<string, (string | null)[]> = Object.fromEntries(
   Array.from({ length: GRID_ROWS }, (_, i) => [String(i), Array(GRID_COLS).fill(null)]),
 );
 
-export const MAX_MEMBERS_PER_GROUP = 4;
+export const MAX_MEMBERS_PER_GROUP = 8;
 export const MAX_GROUPS_PER_USER = 100;
 
 // --- Input validation (server-side mirror of the client rules) ---

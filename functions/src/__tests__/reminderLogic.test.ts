@@ -307,3 +307,121 @@ describe("isValidPushToken", () => {
     expect(isValidPushToken("x".repeat(5000))).toBe(false);
   });
 });
+
+/**
+ * Who each slot actually reaches.
+ *
+ * The three daytime slots speak only to the people who still owe the goal —
+ * telling someone who is already done that the goal is open is noise, and
+ * noise is how an app gets its notifications switched off for good.
+ *
+ * Last call is the deliberate exception. It is the final moment the day can
+ * still be saved, and the members who are DONE are the only ones with any
+ * remaining power over the outcome, so they are brought in to chase whoever
+ * is holding it up.
+ */
+describe("who each slot reaches", () => {
+  const at = (slot: SlotId) =>
+    REMINDER_SLOTS.find((s) => s.id === slot)!.minutes;
+
+  const base = {
+    todayGameDate: "2026-08-07",
+    remindersSentDate: null,
+    remindersSentSlots: [] as SlotId[],
+    memberCount: 4,
+    completedCount: 2,
+    streak: 3,
+    idleDays: 0,
+  };
+
+  it.each<SlotId>(["morning", "midday", "evening"])(
+    "%s reaches only the members who haven't completed",
+    (slot) => {
+      const n = decideNudge({ ...base, localMinutes: at(slot) });
+      expect(n?.recipients).toBe("incomplete");
+    },
+  );
+
+  it("last call reaches the whole crew, not just the stragglers", () => {
+    const n = decideNudge({ ...base, localMinutes: at("lastCall") });
+    expect(n?.recipients).toBe("all");
+  });
+
+  it("still says nothing to anyone once the crew is done", () => {
+    // The chaser must never reach someone whose crew has already finished —
+    // there would be nobody left to chase.
+    const n = decideNudge({
+      ...base,
+      localMinutes: at("lastCall"),
+      completedCount: 4,
+    });
+    expect(n).toBeNull();
+  });
+});
+
+describe("messageFor — the last-call chaser", () => {
+  const ctx = {
+    cityName: "Riverside",
+    streak: 3,
+    build: null,
+    pendingNames: ["Sam", "Jordan"],
+  };
+  const lastCall = {
+    kind: "streak" as const,
+    recipients: "all" as const,
+    slot: "lastCall" as const,
+  };
+
+  it("tells a finished member who is holding the day up", () => {
+    const m = messageFor(lastCall, ctx, "done");
+    expect(m.body).toContain("Sam and Jordan");
+    expect(m.body).toContain("You're done");
+  });
+
+  it("asks a pending member to finish, and never to chase themselves", () => {
+    const m = messageFor(lastCall, ctx, "pending");
+    expect(m.body).not.toContain("You're done");
+    expect(m.body).toContain("still open");
+  });
+
+  it("gives the two sides different copy", () => {
+    // Same city, same slot, same tick — if these ever collapse to one string
+    // the split has silently stopped meaning anything.
+    expect(messageFor(lastCall, ctx, "done").body).not.toBe(
+      messageFor(lastCall, ctx, "pending").body,
+    );
+  });
+
+  it("names one straggler in the singular", () => {
+    const m = messageFor(lastCall, { ...ctx, pendingNames: ["Sam"] }, "done");
+    expect(m.body).toContain("Sam hasn't");
+  });
+
+  it("truncates a long list rather than reciting the roster", () => {
+    const m = messageFor(
+      { ...lastCall },
+      { ...ctx, pendingNames: ["Sam", "Jordan", "Riley"] },
+      "done",
+    );
+    expect(m.body).toContain("Sam and 2 others");
+    expect(m.body).not.toContain("Riley");
+  });
+
+  it("drops the streak clause when there is no streak to lose", () => {
+    const m = messageFor(
+      { ...lastCall, kind: "reminder" },
+      { ...ctx, streak: 0 },
+      "done",
+    );
+    expect(m.body).not.toContain("streak");
+  });
+
+  it("leaves every other slot untouched by the role argument", () => {
+    // Only last call is two-sided; passing a role anywhere else must not
+    // quietly change what the pending members read.
+    for (const slot of ["morning", "midday", "evening"] as SlotId[]) {
+      const n = { kind: "streak" as const, recipients: "incomplete" as const, slot };
+      expect(messageFor(n, ctx, "done").body).toBe(messageFor(n, ctx).body);
+    }
+  });
+});
