@@ -27,19 +27,11 @@ import {
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
 import { joinedMessage, leftMessage } from "./crewMessages";
-import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
 import { NotificationCategory } from "./push";
 import { buildProgressOf, withArticle } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor } from "./buildCatalog";
 
 const db = () => getFirestore();
-
-/** A member's pause leaves with them. */
-function withoutPause(pauses: MemberPauses | null | undefined, uid: string): MemberPauses {
-  const out = { ...(pauses ?? {}) };
-  delete out[uid];
-  return out;
-}
 
 /**
  * Resolve the caller's display name inside a group. Membership is
@@ -153,7 +145,7 @@ async function ensureBuildOrder(
   return { ...data, build_order: order };
 }
 
-export async function maybeProcessDay(
+async function maybeProcessDay(
   groupId: string,
   data: FirebaseFirestore.DocumentData,
 ): Promise<FirebaseFirestore.DocumentData> {
@@ -187,10 +179,6 @@ export async function maybeProcessDay(
     tileBuildDates: data.tile_build_dates ?? {},
     rubbleOrigins: data.rubble_origins ?? {},
     buildOrder: data.build_order ?? null,
-    memberUids: data.member_uids ?? [],
-    memberPauses: data.member_pauses ?? null,
-    cityPause: data.city_pause ?? null,
-    pausedDates: data.paused_dates ?? [],
   });
 
   const writeUpdates: Record<string, unknown> = {
@@ -548,27 +536,6 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       freshData.goal_reset_timezone ?? "UTC",
     );
 
-    // Vacation mode: a paused city has no day to complete, and a paused
-    // member isn't on today's roster. Refused here rather than merely hidden
-    // in the app — a stale client would otherwise record a completion that
-    // day processing then ignores, which is a lie the UI can't explain. The
-    // detail lets the app say why in its own words.
-    const roster = rosterOf(freshData);
-    if (isDayPaused(roster, activityDate)) {
-      throw new HttpsError(
-        "failed-precondition",
-        "This city is paused — nothing counts today",
-        { reason: "paused" },
-      );
-    }
-    if (pausedMembersOn(roster, activityDate).includes(member)) {
-      throw new HttpsError(
-        "failed-precondition",
-        "You're on vacation in this city — tap I'm back first",
-        { reason: "paused" },
-      );
-    }
-
     // Idempotent
     if (completions.includes(member)) {
       completedName = null;
@@ -593,13 +560,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   // finished today (the pressure's on them). Best-effort, after the write.
   if (completedName) {
     const done: string[] = finalData!.completions_today ?? [];
-    // The roster for today is the ACTIVE members — someone on vacation is
-    // neither nudged nor waited for.
-    const today = getProcessingDate(
-      finalData!.goal_reset_time,
-      finalData!.goal_reset_timezone ?? "UTC",
-    );
-    const stillPending: string[] = activeMembersOn(rosterOf(finalData!), today).filter(
+    const stillPending: string[] = (finalData!.group_members ?? []).filter(
       (m: string) => !done.includes(m),
     );
     if (stillPending.length > 0) {
@@ -924,7 +885,6 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
   const repaired = applyStreakRepair({
     buildingCompletions: data.building_completions ?? [],
     frozenDates: data.frozen_dates ?? [],
-    pausedDates: data.paused_dates ?? [],
     brokenStreak: data.broken_streak ?? null,
     todayStr: today,
   });
@@ -990,7 +950,6 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
       group_members: newMembers,
       member_uids: newUids,
       completions_today: newCompletions,
-      member_pauses: withoutPause(data.member_pauses, uid),
     });
     tx.set(userRef, { group_ids: FieldValue.arrayRemove(group_id) }, { merge: true });
 
@@ -1108,7 +1067,6 @@ export const deleteAccount = onCall({ enforceAppCheck: true }, async (request) =
         group_members: (data.group_members as string[]).filter((_, i) => i !== idx),
         member_uids: (data.member_uids as string[]).filter((_, i) => i !== idx),
         completions_today: (data.completions_today as string[]).filter((m) => m !== name),
-        member_pauses: withoutPause(data.member_pauses, uid),
       });
     }
   }
