@@ -1,0 +1,65 @@
+name: Storage bootstrap
+
+# One-shot: create the project's default Cloud Storage for Firebase bucket
+# (bitty-city.firebasestorage.app) — the console's "Get started" click, done
+# with the same service account the deploy workflow uses. Safe to re-run:
+# the API re-links an existing default bucket instead of failing.
+#
+# Exists because the proof-photo feature needs the bucket before
+# `firebase deploy --only storage` can release storage.rules, and nobody's
+# laptop needs to hold Firebase credentials for that.
+
+on:
+  workflow_dispatch:
+    inputs:
+      location:
+        description: "Bucket location (Functions live in us-central1)"
+        default: "US-CENTRAL1"
+        type: string
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Write credentials
+        env:
+          SA_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA_KEY" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT secret is not set."
+            exit 1
+          fi
+          printf '%s' "$SA_KEY" > "$RUNNER_TEMP/sa.json"
+          gcloud auth activate-service-account --key-file="$RUNNER_TEMP/sa.json"
+          gcloud config set project bitty-city --quiet
+
+      - name: Enable the Cloud Storage for Firebase API
+        run: gcloud services enable firebasestorage.googleapis.com storage.googleapis.com --project bitty-city
+
+      - name: Create (or re-link) the default bucket
+        run: |
+          TOKEN=$(gcloud auth print-access-token)
+          BODY=$(printf '{"location":"%s","storageClass":"STANDARD"}' "${{ inputs.location }}")
+          HTTP=$(curl -sS -o "$RUNNER_TEMP/resp.json" -w "%{http_code}" \
+            -X POST "https://firebasestorage.googleapis.com/v1beta/projects/bitty-city/defaultBucket" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "x-goog-user-project: bitty-city" \
+            -d "$BODY")
+          echo "HTTP $HTTP"
+          cat "$RUNNER_TEMP/resp.json"; echo
+          case "$HTTP" in
+            200|201) ;;
+            409) echo "Default bucket already exists — nothing to do." ;;
+            *) echo "::error::defaultBucket.create failed (HTTP $HTTP)"; exit 1 ;;
+          esac
+
+      - name: Verify
+        run: |
+          TOKEN=$(gcloud auth print-access-token)
+          curl -sS "https://firebasestorage.googleapis.com/v1beta/projects/bitty-city/defaultBucket" \
+            -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: bitty-city"
+          echo
+          echo "Anonymous list (expect 403 now, was 404):"
+          curl -s -o /dev/null -w "%{http_code}\n" "https://firebasestorage.googleapis.com/v0/b/bitty-city.firebasestorage.app/o?maxResults=1"
