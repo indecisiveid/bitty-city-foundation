@@ -93,6 +93,7 @@ export function groupToResponse(
     building_completions: data.building_completions ?? [],
     kudos_today: data.kudos_today ?? null,
     nudges_today: data.nudges_today ?? null,
+    proofs_today: data.proofs_today ?? null,
     created_at:
       data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
   };

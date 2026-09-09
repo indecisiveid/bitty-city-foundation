@@ -31,6 +31,8 @@ import { joinedMessage, leftMessage } from "./crewMessages";
 import { NotificationCategory } from "./push";
 import { buildProgressOf, withArticle } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor } from "./buildCatalog";
+import { isProofKeyFor, applyProof, ProofEntry, MAX_PROOF_BYTES } from "./proofs";
+import { proofsBucket, proofObjectSize, deleteProofObject } from "./proofStorage";
 
 const db = () => getFirestore();
 
@@ -50,6 +52,29 @@ export function memberNameForUid(
     throw new HttpsError("failed-precondition", "Not a member of this group");
   }
   return data.group_members[idx];
+}
+
+/**
+ * `completeGoal` proof argument. Absent (old binaries) or `{skipped:true}`
+ * → "skipped". `{key}` → must be under this caller's own slot in this group,
+ * and the object must already be in the bucket and within the size cap.
+ */
+async function resolveProof(raw: unknown, groupId: string, uid: string): Promise<ProofEntry> {
+  const proof = raw as { key?: unknown; skipped?: unknown } | undefined;
+  if (!proof || proof.skipped === true) return { status: "skipped" };
+  if (!isProofKeyFor(proof.key, groupId, uid)) {
+    throw new HttpsError("invalid-argument", "proof.key is not one of your uploads for this group");
+  }
+  const bucket = proofsBucket.value();
+  const size = await proofObjectSize(proof.key, bucket);
+  if (size == null) {
+    throw new HttpsError("failed-precondition", "Photo upload didn't finish — try again or skip");
+  }
+  if (size > MAX_PROOF_BYTES) {
+    await deleteProofObject(proof.key, bucket);
+    throw new HttpsError("failed-precondition", "Photo is too large — try again or skip");
+  }
+  return { status: "photo", key: proof.key };
 }
 
 function createdAtIso(data: FirebaseFirestore.DocumentData): string | null {
@@ -154,6 +179,9 @@ async function maybeProcessDay(
     // Same for peer nudges — "you already reminded Sam" must not survive
     // into a day where Sam is late again. See `nudges.ts`.
     nudges_today: null,
+    // Proofs are recorded durably in days/{date}; the today bucket goes
+    // with completions_today. See proofs.ts.
+    proofs_today: null,
   };
 
   await db().collection("groups").doc(groupId).update(writeUpdates);
@@ -456,7 +484,7 @@ export function dayCompleteMessage(data: FirebaseFirestore.DocumentData) {
 
 export const completeGoal = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
-  const { group_id } = request.data;
+  const { group_id, proof } = request.data;
 
   if (!group_id) {
     throw new HttpsError("invalid-argument", "group_id is required");
@@ -479,6 +507,10 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
     data = await maybeProcessDay(group_id, data);
   }
+
+  // Verify the proof OUTSIDE the transaction — it's a network round-trip to
+  // Storage and Firestore transactions may retry.
+  const proofEntry = await resolveProof(proof, group_id, uid);
 
   // Set only when THIS call is the one that records a new completion (not the
   // idempotent re-tap), so we notify teammates exactly once.
@@ -507,14 +539,23 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
 
     const newCompletions = [...completions, member];
     completedName = member;
+    const { state: proofsToday } = applyProof(freshData.proofs_today, activityDate, member, proofEntry);
     tx.update(groupRef, {
       completions_today: newCompletions,
       last_activity_date: activityDate,
+      proofs_today: proofsToday,
     });
+    // Durable per-day ledger — what "See proof" on a building reads.
+    tx.set(
+      groupRef.collection("days").doc(activityDate),
+      { proofs: { [member]: { ...proofEntry, at: new Date().toISOString() } } },
+      { merge: true },
+    );
     finalData = {
       ...freshData,
       completions_today: newCompletions,
       last_activity_date: activityDate,
+      proofs_today: proofsToday,
     };
   });
 
