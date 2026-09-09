@@ -4,6 +4,7 @@
  */
 import {
   decideNudge,
+  daysUntilMeteor,
   slotForLocalMinutes,
   REMINDER_SLOTS,
   SLOT_WINDOW_MINUTES,
@@ -29,6 +30,7 @@ const base: NudgeInput = {
   completedCount: 1,
   streak: 0,
   idleDays: 0,
+  daysSinceMeteor: null,
 };
 
 describe("slotForLocalMinutes", () => {
@@ -142,6 +144,61 @@ describe("decideNudge", () => {
     expect(decideNudge({ ...base, idleDays: INACTIVITY_METEOR_DAYS - 2 })?.kind).not.toBe(
       "meteor",
     );
+  });
+
+  it("stops warning once the meteor has landed and nobody has come back", () => {
+    // Landing does not reset idleDays — only a completion does — so the idle
+    // count alone would keep "Meteor incoming" firing four times a day forever.
+    const n = decideNudge({
+      ...base,
+      idleDays: INACTIVITY_METEOR_DAYS + 1,
+      daysSinceMeteor: 1,
+    });
+    expect(n).not.toBeNull();
+    expect(n?.kind).not.toBe("meteor");
+  });
+
+  it("warns again the day before the NEXT meteor is due", () => {
+    const n = decideNudge({
+      ...base,
+      idleDays: 2 * INACTIVITY_METEOR_DAYS - 1,
+      daysSinceMeteor: INACTIVITY_METEOR_DAYS - 1,
+    });
+    expect(n?.kind).toBe("meteor");
+  });
+
+  it("does not claim an overdue meteor can still be stopped", () => {
+    // Day processing is lazy and completeGoal runs it first, so an overdue
+    // meteor lands the moment anyone opens the app — "complete today's goal to
+    // stop the meteor" would be untrue.
+    expect(decideNudge({ ...base, idleDays: INACTIVITY_METEOR_DAYS })?.kind).not.toBe(
+      "meteor",
+    );
+    expect(
+      decideNudge({
+        ...base,
+        idleDays: INACTIVITY_METEOR_DAYS + 5,
+        daysSinceMeteor: INACTIVITY_METEOR_DAYS + 2,
+      })?.kind,
+    ).not.toBe("meteor");
+  });
+});
+
+describe("daysUntilMeteor", () => {
+  it("counts down from the last activity when no meteor has landed", () => {
+    expect(daysUntilMeteor(0, null)).toBe(INACTIVITY_METEOR_DAYS);
+    expect(daysUntilMeteor(INACTIVITY_METEOR_DAYS - 1, null)).toBe(1);
+    expect(daysUntilMeteor(INACTIVITY_METEOR_DAYS + 2, null)).toBe(-2);
+  });
+
+  it("is held back by the previous landing, mirroring processEndOfDay", () => {
+    expect(daysUntilMeteor(INACTIVITY_METEOR_DAYS + 1, 1)).toBe(INACTIVITY_METEOR_DAYS - 1);
+    expect(daysUntilMeteor(2 * INACTIVITY_METEOR_DAYS - 1, INACTIVITY_METEOR_DAYS - 1)).toBe(1);
+  });
+
+  it("is null when activity is unknown", () => {
+    expect(daysUntilMeteor(null, null)).toBeNull();
+    expect(daysUntilMeteor(null, 3)).toBeNull();
   });
 });
 
@@ -332,6 +389,7 @@ describe("who each slot reaches", () => {
     completedCount: 2,
     streak: 3,
     idleDays: 0,
+    daysSinceMeteor: null as number | null,
   };
 
   it.each<SlotId>(["morning", "midday", "evening"])(

@@ -62,6 +62,7 @@ async function runNudges(): Promise<void> {
       const members: string[] = data.group_members ?? [];
       const completions: string[] = data.completions_today ?? [];
       const lastActivity: string | null = data.last_activity_date ?? null;
+      const lastMeteor: string | null = data.last_inactivity_meteor_date ?? null;
       const sentDate: string | null = data.reminders_sent_date ?? null;
       const sentSlots: SlotId[] = data.reminders_sent_slots ?? [];
 
@@ -74,6 +75,7 @@ async function runNudges(): Promise<void> {
         completedCount: completions.length,
         streak: data.streak ?? 0,
         idleDays: lastActivity ? daysBetween(lastActivity, todayGameDate) : null,
+        daysSinceMeteor: lastMeteor ? daysBetween(lastMeteor, todayGameDate) : null,
       });
 
       if (!nudge) return;

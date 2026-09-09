@@ -36,7 +36,9 @@
  *
  * The message escalates by urgency:
  *
- *   meteor   → the 7-day inactivity meteor is one idle day away  → warn ALL
+ *   meteor   → the 7-day inactivity meteor lands tomorrow unless today's goal
+ *              is done (see daysUntilMeteor — a landed one doesn't
+ *              re-warn until the next is due)                    → warn ALL
  *   streak   → a live streak is on the line and the day isn't done → nudge the
  *              members who still haven't completed
  *   reminder → plain "don't forget today's goal"                  → same
@@ -73,6 +75,8 @@ export interface NudgeInput {
   streak: number;
   /** Whole days since last activity (completion), or null if unknown. */
   idleDays: number | null;
+  /** Whole days since the last inactivity meteor landed, or null if never. */
+  daysSinceMeteor: number | null;
 }
 
 export interface Nudge {
@@ -93,6 +97,27 @@ export function slotForLocalMinutes(localMinutes: number): SlotId | null {
       localMinutes >= s.minutes && localMinutes < s.minutes + SLOT_WINDOW_MINUTES,
   );
   return slot?.id ?? null;
+}
+
+/**
+ * Whole days until the inactivity meteor would land, by the game's own rule
+ * (gameLogic.processEndOfDay): it fires once the crew has been idle for
+ * INACTIVITY_METEOR_DAYS, and then at most once per INACTIVITY_METEOR_DAYS
+ * after the previous landing. Null when activity is unknown.
+ *
+ * Landing a meteor does NOT reset the idle count — only a completion does —
+ * which is why the previous landing has to be part of this. Zero or below
+ * means it is overdue: day processing is lazy (and completeGoal runs it first),
+ * so an overdue meteor lands the moment anyone opens the app.
+ */
+export function daysUntilMeteor(
+  idleDays: number | null,
+  daysSinceMeteor: number | null,
+): number | null {
+  if (idleDays === null) return null;
+  const byIdle = INACTIVITY_METEOR_DAYS - idleDays;
+  if (daysSinceMeteor === null) return byIdle;
+  return Math.max(byIdle, INACTIVITY_METEOR_DAYS - daysSinceMeteor);
 }
 
 /**
@@ -117,10 +142,12 @@ export function decideNudge(input: NudgeInput): Nudge | null {
   const allComplete = input.completedCount >= input.memberCount;
   if (allComplete) return null;
 
-  // Meteor is imminent when the crew is one idle day short of the threshold
-  // and today still isn't a success (nobody's completed yet counts as idle).
+  // Meteor is imminent when it lands TOMORROW unless today's goal is done —
+  // exactly one day out, not "at least". Any later and it has either landed
+  // already (the idle count keeps growing after a landing, so `>=` warned
+  // four times a day forever) or is overdue and can no longer be stopped.
   const meteorImminent =
-    input.idleDays !== null && input.idleDays >= INACTIVITY_METEOR_DAYS - 1;
+    daysUntilMeteor(input.idleDays, input.daysSinceMeteor) === 1;
   if (meteorImminent) return { kind: "meteor", recipients: "all", slot };
 
   // Last call goes to the whole crew — the members who are done are the ones
