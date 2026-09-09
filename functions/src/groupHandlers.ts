@@ -12,7 +12,6 @@ import {
   applyBuildRescue,
   isFirstDayGrace,
   findEmptyTiles,
-  findOccupiedTiles,
   STARTING_FREEZES,
   rowMajorBuildOrder,
 } from "./gameLogic";
@@ -28,11 +27,19 @@ import {
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
 import { joinedMessage, leftMessage } from "./crewMessages";
+import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
 import { NotificationCategory } from "./push";
 import { buildProgressOf, withArticle } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor } from "./buildCatalog";
 
 const db = () => getFirestore();
+
+/** A member's pause leaves with them. */
+function withoutPause(pauses: MemberPauses | null | undefined, uid: string): MemberPauses {
+  const out = { ...(pauses ?? {}) };
+  delete out[uid];
+  return out;
+}
 
 /**
  * Resolve the caller's display name inside a group. Membership is
@@ -84,12 +91,49 @@ async function ensurePlanAnchor(
   groupId: string,
   data: FirebaseFirestore.DocumentData,
 ): Promise<FirebaseFirestore.DocumentData> {
-  if (typeof data.plan_frozen_at_buildings === "number") return data;
-  const frozen = findOccupiedTiles(data.city_map ?? {}).length;
-  await db().collection("groups").doc(groupId).update({
-    plan_frozen_at_buildings: frozen,
-  });
-  return { ...data, plan_frozen_at_buildings: frozen };
+  const updates = planAnchorUpdates(data);
+  if (!updates) return data;
+  await db().collection("groups").doc(groupId).update(updates);
+  return { ...data, ...updates };
+}
+
+/**
+ * Anchor version. Bumped once, on 2026-09-09: the app had never actually read
+ * `plan_frozen_at_buildings` (its snapshot mapper dropped the field), so every
+ * city — including ones stamped 0 at creation — has only ever rendered with
+ * the legacy ray plan. The first client that DOES read the anchor would have
+ * relocated everything built after the original stamp. Re-stamping every city
+ * at its current size before that client ships keeps every standing building
+ * where it is; only blocks built from here on grow compactly.
+ */
+export const PLAN_ANCHOR_VERSION = 2;
+
+/**
+ * What `ensurePlanAnchor` should write for this doc, or null if nothing.
+ * Pure, so the re-stamp rule is unit-testable.
+ *
+ * The anchor is in SLOT units — every built cell, levelled lots included —
+ * because that is the count the client feeds `blocksVisibleCount` when it
+ * decides how many blocks stay legacy. Counting only standing buildings
+ * would run one block short on any city with rubble, and that block would
+ * move.
+ */
+export function planAnchorUpdates(
+  data: FirebaseFirestore.DocumentData,
+): { plan_frozen_at_buildings: number; plan_anchor_version: number } | null {
+  if (
+    typeof data.plan_frozen_at_buildings === "number" &&
+    data.plan_anchor_version === PLAN_ANCHOR_VERSION
+  ) {
+    return null;
+  }
+  const slots: string[] = Array.isArray(data.build_order)
+    ? data.build_order
+    : rowMajorBuildOrder(data.city_map ?? {});
+  return {
+    plan_frozen_at_buildings: slots.length,
+    plan_anchor_version: PLAN_ANCHOR_VERSION,
+  };
 }
 
 /**
@@ -109,11 +153,12 @@ async function ensureBuildOrder(
   return { ...data, build_order: order };
 }
 
-async function maybeProcessDay(
+export async function maybeProcessDay(
   groupId: string,
   data: FirebaseFirestore.DocumentData,
 ): Promise<FirebaseFirestore.DocumentData> {
   data = await ensureBuildOrder(groupId, data);
+  data = await ensurePlanAnchor(groupId, data);
   const goalResetTimezone: string = data.goal_reset_timezone ?? "UTC";
   if (!needsDayProcessing(data.goal_reset_time, data.last_processed_date, goalResetTimezone)) {
     return data;
@@ -142,6 +187,10 @@ async function maybeProcessDay(
     tileBuildDates: data.tile_build_dates ?? {},
     rubbleOrigins: data.rubble_origins ?? {},
     buildOrder: data.build_order ?? null,
+    memberUids: data.member_uids ?? [],
+    memberPauses: data.member_pauses ?? null,
+    cityPause: data.city_pause ?? null,
+    pausedDates: data.paused_dates ?? [],
   });
 
   const writeUpdates: Record<string, unknown> = {
@@ -258,6 +307,7 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           parks: [],
           // Founded after compact growth shipped, so nothing to freeze.
           plan_frozen_at_buildings: 0,
+          plan_anchor_version: PLAN_ANCHOR_VERSION,
           last_processed_date: null,
           pending_event: null,
           building_completions: [],
@@ -498,6 +548,27 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       freshData.goal_reset_timezone ?? "UTC",
     );
 
+    // Vacation mode: a paused city has no day to complete, and a paused
+    // member isn't on today's roster. Refused here rather than merely hidden
+    // in the app — a stale client would otherwise record a completion that
+    // day processing then ignores, which is a lie the UI can't explain. The
+    // detail lets the app say why in its own words.
+    const roster = rosterOf(freshData);
+    if (isDayPaused(roster, activityDate)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This city is paused — nothing counts today",
+        { reason: "paused" },
+      );
+    }
+    if (pausedMembersOn(roster, activityDate).includes(member)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "You're on vacation in this city — tap I'm back first",
+        { reason: "paused" },
+      );
+    }
+
     // Idempotent
     if (completions.includes(member)) {
       completedName = null;
@@ -522,7 +593,13 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   // finished today (the pressure's on them). Best-effort, after the write.
   if (completedName) {
     const done: string[] = finalData!.completions_today ?? [];
-    const stillPending: string[] = (finalData!.group_members ?? []).filter(
+    // The roster for today is the ACTIVE members — someone on vacation is
+    // neither nudged nor waited for.
+    const today = getProcessingDate(
+      finalData!.goal_reset_time,
+      finalData!.goal_reset_timezone ?? "UTC",
+    );
+    const stillPending: string[] = activeMembersOn(rosterOf(finalData!), today).filter(
       (m: string) => !done.includes(m),
     );
     if (stillPending.length > 0) {
@@ -847,6 +924,7 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
   const repaired = applyStreakRepair({
     buildingCompletions: data.building_completions ?? [],
     frozenDates: data.frozen_dates ?? [],
+    pausedDates: data.paused_dates ?? [],
     brokenStreak: data.broken_streak ?? null,
     todayStr: today,
   });
@@ -912,6 +990,7 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
       group_members: newMembers,
       member_uids: newUids,
       completions_today: newCompletions,
+      member_pauses: withoutPause(data.member_pauses, uid),
     });
     tx.set(userRef, { group_ids: FieldValue.arrayRemove(group_id) }, { merge: true });
 
@@ -1029,6 +1108,7 @@ export const deleteAccount = onCall({ enforceAppCheck: true }, async (request) =
         group_members: (data.group_members as string[]).filter((_, i) => i !== idx),
         member_uids: (data.member_uids as string[]).filter((_, i) => i !== idx),
         completions_today: (data.completions_today as string[]).filter((m) => m !== name),
+        member_pauses: withoutPause(data.member_pauses, uid),
       });
     }
   }
