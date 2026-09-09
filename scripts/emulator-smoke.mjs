@@ -18,6 +18,46 @@ const AUTH = 'http://127.0.0.1:9099';
 const FUNCTIONS = 'http://127.0.0.1:5001/bitty-city/us-central1';
 const FIRESTORE = 'http://127.0.0.1:8080';
 const PROJECT = 'bitty-city';
+const STORAGE = 'http://127.0.0.1:9199';
+const BUCKET = 'bitty-city.firebasestorage.app';
+
+// A 1×1 JPEG — small, valid, unmistakably an image.
+const TINY_JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==',
+  'base64',
+);
+
+/**
+ * Upload as a user through the Storage emulator's REST API — rules apply.
+ * Multipart with a JSON metadata part, which is what the client SDKs send;
+ * a bare-body upload carries no contentType into rules and is refused.
+ */
+async function putObject(key, body, user, contentType = 'image/jpeg') {
+  const boundary = `bc-smoke-${Date.now()}`;
+  const meta = JSON.stringify({ name: key, contentType });
+  const payload = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=utf-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`),
+    body,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+  const res = await fetch(`${STORAGE}/v0/b/${BUCKET}/o?name=${encodeURIComponent(key)}&uploadType=multipart`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+      'X-Goog-Upload-Protocol': 'multipart',
+      Authorization: `Firebase ${user.idToken}`,
+    },
+    body: payload,
+  });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+/** Download as a user (rules apply). */
+async function getObject(key, user) {
+  const headers = user ? { Authorization: `Firebase ${user.idToken}` } : {};
+  const res = await fetch(`${STORAGE}/v0/b/${BUCKET}/o/${encodeURIComponent(key)}?alt=media`, { headers });
+  return { status: res.status, type: res.headers.get('content-type') ?? '' };
+}
 
 let passed = 0;
 let failed = 0;
@@ -188,6 +228,63 @@ async function main() {
 
   const eveComplete = await call('completeGoal', { group_id: g.group_id }, eve);
   check('non-member completeGoal rejected', eveComplete.error === 'FAILED_PRECONDITION', JSON.stringify(eveComplete));
+
+  console.log('— proofs —');
+  const pc = await call(
+    'createGroup',
+    { group_name: 'Proof City', member: 'Christian', daily_goal: 'Show your work', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  );
+  const pg = pc.result;
+  await call('joinGroup', { group_code: pg.group_code, member: 'Bob' }, bob);
+  const key = `proofs/${pg.group_id}/${dev.uid}/smoke-${Date.now()}.jpg`;
+
+  // storage.rules
+  const asOutsider = await putObject(`proofs/${pg.group_id}/${eve.uid}/outsider-1234.jpg`, TINY_JPEG, eve);
+  check('rules: non-member cannot upload', asOutsider.status === 403, `status=${asOutsider.status}`);
+  const asOther = await putObject(key, TINY_JPEG, bob);
+  check("rules: member cannot upload under someone else's uid", asOther.status === 403, `status=${asOther.status}`);
+  const wrongType = await putObject(key, TINY_JPEG, dev, 'image/png');
+  check('rules: only image/jpeg', wrongType.status === 403, `status=${wrongType.status}`);
+  const tooBig = await putObject(key, Buffer.alloc(5 * 1024 * 1024 + 1), dev);
+  check('rules: >5 MiB refused', tooBig.status === 403, `status=${tooBig.status}`);
+
+  // server refuses a key that isn't there yet
+  const early = await call('completeGoal', { group_id: pg.group_id, proof: { key } }, dev);
+  check('completeGoal with an unuploaded key is refused', early.error === 'FAILED_PRECONDITION', JSON.stringify(early));
+  const stolen = await call('completeGoal', { group_id: pg.group_id, proof: { key } }, bob);
+  check("completeGoal with someone else's key is refused", stolen.error === 'INVALID_ARGUMENT', JSON.stringify(stolen));
+
+  const up = await putObject(key, TINY_JPEG, dev);
+  check('rules: own jpeg upload accepted', up.status === 200 || up.status === 201, `status=${up.status} ${JSON.stringify(up.body).slice(0, 120)}`);
+  const overwrite = await putObject(key, TINY_JPEG, dev);
+  check('rules: create-only — overwrite refused', overwrite.status === 403, `status=${overwrite.status}`);
+
+  const withProof = await call('completeGoal', { group_id: pg.group_id, proof: { key } }, dev);
+  check('completeGoal with the uploaded key succeeds', withProof.result?.completions_today?.includes('Christian'), JSON.stringify(withProof).slice(0, 200));
+  check('proofs_today records the photo', withProof.result?.proofs_today?.entries?.Christian?.status === 'photo', JSON.stringify(withProof.result?.proofs_today));
+  const skippedDone = await call('completeGoal', { group_id: pg.group_id, proof: { skipped: true } }, bob);
+  check('completeGoal skipped records skipped', skippedDone.result?.proofs_today?.entries?.Bob?.status === 'skipped', JSON.stringify(skippedDone.result?.proofs_today));
+  const legacy = await call('completeGoal', { group_id: pg.group_id }, bob);
+  check('completeGoal without proof stays idempotent', legacy.result?.proofs_today?.entries?.Bob?.status === 'skipped');
+
+  const today = withProof.result?.proofs_today?.date;
+  const dayAsMember = await readDoc(`groups/${pg.group_id}/days/${today}`, bob);
+  check('day ledger readable by a member', dayAsMember.status === 200 && !!dayAsMember.body?.fields?.proofs, `status=${dayAsMember.status}`);
+  const dayAsOutsider = await readDoc(`groups/${pg.group_id}/days/${today}`, eve);
+  check('day ledger hidden from non-members', dayAsOutsider.status === 403, `status=${dayAsOutsider.status}`);
+
+  const viewAsMember = await getObject(key, bob);
+  check('rules: member can read the photo', viewAsMember.status === 200 && viewAsMember.type.startsWith('image/jpeg'), `status=${viewAsMember.status} type=${viewAsMember.type}`);
+  const viewAsOutsider = await getObject(key, eve);
+  check('rules: non-member cannot read the photo', viewAsOutsider.status === 403, `status=${viewAsOutsider.status}`);
+  const viewAnon = await getObject(key, null);
+  check('rules: anonymous cannot read the photo', viewAnon.status === 403 || viewAnon.status === 401, `status=${viewAnon.status}`);
+
+  // Proof City was founded by `dev`; later checks assert dev's group_ids ends
+  // up empty, so tear it down here (founder-only delete — also exercised).
+  const pgDel = await call('deleteGroup', { group_id: pg.group_id }, dev);
+  check('proof city deleted', pgDel.result?.success === true, JSON.stringify(pgDel));
 
   console.log('— kudos —');
   const kudosSelf = await call('sendKudos', { group_id: g.group_id, to_member: 'Christian' }, dev);
