@@ -34,7 +34,11 @@ jobs:
           gcloud auth activate-service-account --key-file="$RUNNER_TEMP/sa.json"
           gcloud config set project bitty-city --quiet
 
-      - name: Enable the Cloud Storage for Firebase API
+      # The deploy SA can't enable APIs (no serviceusage.services.enable);
+      # on a Firebase project firebasestorage.googleapis.com is normally
+      # already on, so a failure here is informational.
+      - name: Enable the Cloud Storage for Firebase API (best effort)
+        continue-on-error: true
         run: gcloud services enable firebasestorage.googleapis.com storage.googleapis.com --project bitty-city
 
       - name: Create (or re-link) the default bucket
