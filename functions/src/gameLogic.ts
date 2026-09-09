@@ -119,6 +119,17 @@ export interface GroupDoc {
   current_build: CurrentBuild | null;
   abandoned_build?: AbandonedBuild | null;
   city_map: CityMap;
+  /**
+   * Every built cell as "row,col", in the order it landed. This — not the
+   * cell's row-major position — is a building's slot in the client's block
+   * plan. Landings go on a RANDOM empty tile, so ordering by grid position
+   * let one landing insert itself ahead of the whole city and move every
+   * building. Append-only; a levelled lot keeps its entry so a repair lands
+   * back on its slot. Absent on docs written before it existed — the client
+   * (and `rowMajorBuildOrder`) fall back to row-major, which is exactly how
+   * those cities rendered, so backfilling moves nothing.
+   */
+  build_order?: string[];
   /** Parks, recorded outside `city_map` — absent on cities that predate them. */
   parks?: Park[] | null;
   last_processed_date: string | null;
@@ -135,6 +146,7 @@ export interface GroupDoc {
 export interface EndOfDayUpdates {
   completions_today: string[];
   city_map?: CityMap;
+  build_order?: string[];
   parks?: Park[];
   current_build?: CurrentBuild | null;
   abandoned_build?: AbandonedBuild | null;
@@ -401,6 +413,29 @@ export function findEmptyTiles(cityMap: CityMap): number[][] {
 }
 
 // ---------------------------------------------------------------------------
+// rowMajorBuildOrder — the slot order a city rendered in BEFORE `build_order`
+// existed: every built cell (rubble included — a levelled lot is still a
+// slot) in row-major order. This is what a missing `build_order` means, so
+// stamping it onto an old doc changes nothing on screen.
+// ---------------------------------------------------------------------------
+
+export function rowMajorBuildOrder(cityMap: CityMap): string[] {
+  const keys: string[] = [];
+  const rows = Object.keys(cityMap)
+    .map((k) => parseInt(k, 10))
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
+  for (const r of rows) {
+    const row = cityMap[String(r)];
+    if (!Array.isArray(row)) continue;
+    for (let c = 0; c < row.length; c++) {
+      if (row[c] !== null && row[c] !== undefined) keys.push(`${r},${c}`);
+    }
+  }
+  return keys;
+}
+
+// ---------------------------------------------------------------------------
 // findOccupiedTiles — dimension-agnostic, mirrors Python `_find_occupied_tiles`
 // ---------------------------------------------------------------------------
 
@@ -542,6 +577,8 @@ export function processEndOfDay(params: {
   tileBuildDates?: Record<string, string>;
   /** "row,col" → the type levelled there, for repairs. */
   rubbleOrigins?: Record<string, string>;
+  /** See GroupDoc.build_order. Undefined → derived row-major from the map. */
+  buildOrder?: string[] | null;
 }): EndOfDayUpdates {
   const {
     groupMembers,
@@ -560,6 +597,7 @@ export function processEndOfDay(params: {
     isGraceDay = false,
     tileBuildDates = {},
     rubbleOrigins = {},
+    buildOrder,
   } = params;
 
   const updates: EndOfDayUpdates = {
@@ -649,6 +687,13 @@ export function processEndOfDay(params: {
             : empty[Math.floor(Math.random() * empty.length)];
           newMap[tile[0]][tile[1]] = currentBuild.type;
           updates.city_map = newMap;
+          // The landing's SLOT is its place in `build_order`, never its grid
+          // cell. A repair lands on a lot that is already listed (rubble keeps
+          // its entry), so it stays put; anything else is appended — the
+          // growth frontier — whatever tile the lottery picked.
+          const key = `${tile[0]},${tile[1]}`;
+          const order = buildOrder ?? rowMajorBuildOrder(cityMap);
+          if (!order.includes(key)) updates.build_order = [...order, key];
           newBuildDates[`${tile[0]},${tile[1]}`] = processingDate;
           buildDatesChanged = true;
           // Something stands here again, so the lot is no longer a ruin

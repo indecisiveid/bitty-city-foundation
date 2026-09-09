@@ -85,6 +85,7 @@ export function groupToResponse(
     current_build: data.current_build ?? null,
     abandoned_build: data.abandoned_build ?? null,
     city_map: data.city_map,
+    build_order: data.build_order ?? null,
     parks: data.parks ?? [],
     plan_frozen_at_buildings: data.plan_frozen_at_buildings ?? null,
     last_processed_date: data.last_processed_date ?? null,

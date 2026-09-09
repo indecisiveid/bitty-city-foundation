@@ -6,6 +6,7 @@ import {
   findOccupiedTiles,
   getProcessingDate,
   INACTIVITY_METEOR_DAYS,
+  rowMajorBuildOrder,
 } from "./gameLogic";
 import { EMPTY_CITY, GRID_ROWS, GRID_COLS, groupToResponse } from "./utils";
 import { requireDemoAccess } from "./auth";
@@ -147,12 +148,18 @@ export const demoFillCity = onCall({ enforceAppCheck: true }, async (request) =>
   );
   const buildDates: Record<string, string> = { ...(data.tile_build_dates ?? {}) };
   const today = new Date().toISOString().slice(0, 10);
+  // Filled tiles are landings: appended to the slot order, never re-sorted.
+  const order: string[] = Array.isArray(data.build_order)
+    ? [...data.build_order]
+    : rowMajorBuildOrder(cityMap);
   for (const [r, c] of tilesToFill) {
     newMap[r][c] = buildingTypes[Math.floor(Math.random() * buildingTypes.length)];
     buildDates[`${r},${c}`] = today;
+    const key = `${r},${c}`;
+    if (!order.includes(key)) order.push(key);
   }
 
-  await groupRef.update({ city_map: newMap, tile_build_dates: buildDates });
+  await groupRef.update({ city_map: newMap, tile_build_dates: buildDates, build_order: order });
 
   const updatedSnap = await groupRef.get();
   return groupToResponse(group_id, updatedSnap.data()!);
@@ -215,6 +222,7 @@ export const demoSetBuildings = onCall({ enforceAppCheck: true }, async (request
 
   await groupRef.update({
     city_map: newMap,
+    build_order: rowMajorBuildOrder(newMap),
     current_build: null,
     pending_event: null,
     completions_today: [],
@@ -291,6 +299,7 @@ export const demoShowcaseCity = onCall({ enforceAppCheck: true }, async (request
 
   await groupRef.update({
     city_map: newMap,
+    build_order: rowMajorBuildOrder(newMap),
     tile_build_dates: buildDates,
     // Anchored to the block sequence, not to coordinates — see parks.ts.
     parks: [
@@ -346,6 +355,7 @@ export const demoResetCity = onCall({ enforceAppCheck: true }, async (request) =
 
   await groupRef.update({
     city_map: emptyMap,
+    build_order: [],
     current_build: null,
     pending_event: null,
     completions_today: [],

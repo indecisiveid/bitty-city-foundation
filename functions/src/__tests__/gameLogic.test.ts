@@ -19,6 +19,7 @@ import {
   isFirstDayGrace,
   daysBetween,
   findOccupiedTiles,
+  rowMajorBuildOrder,
   FREEZE_CAP,
   CityMap,
 } from "../gameLogic";
@@ -985,5 +986,84 @@ describe("getProcessingDate", () => {
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);
     const yesterdayUtc = yesterday.toISOString().split("T")[0];
     expect([todayUtc, yesterdayUtc]).toContain(result);
+  });
+});
+
+describe("build_order — a landing's slot is its place in the list, not its cell", () => {
+  // A city the lottery filled at random: nothing is in row-major order.
+  const standing = (): CityMap => {
+    const m = emptyMap(10, 10);
+    m["7"][3] = "house";
+    m["5"][5] = "apartment";
+    m["8"][1] = "house";
+    return m;
+  };
+  const ORDER = ["7,3", "5,5", "8,1"];
+  const landedAt = (updates: ReturnType<typeof processEndOfDay>) => {
+    const ev = updates.pending_event as { type: string; tile: number[] };
+    expect(ev.type).toBe("build_complete");
+    return `${ev.tile[0]},${ev.tile[1]}`;
+  };
+
+  it("appends the landing whatever tile the lottery picked", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        cityMap: standing(),
+        buildOrder: ORDER,
+        currentBuild: { type: "house", days_required: 1, days_completed: 0 },
+      }),
+    );
+    expect(updates.build_order).toEqual([...ORDER, landedAt(updates)]);
+  });
+
+  it("a repair lands on its own lot, which already has a slot — no new entry", () => {
+    const m = standing();
+    m["5"][5] = "rubble";
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        cityMap: m,
+        buildOrder: ORDER,
+        rubbleOrigins: { "5,5": "apartment" },
+        currentBuild: {
+          type: "apartment", days_required: 1, days_completed: 0,
+          target_tile: { row: 5, col: 5 },
+        },
+      }),
+    );
+    expect(updates.city_map!["5"][5]).toBe("apartment");
+    expect(landedAt(updates)).toBe("5,5");
+    expect(updates.build_order).toBeUndefined();
+  });
+
+  it("a doc without build_order gets row-major — how it rendered before — plus the landing", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        cityMap: standing(),
+        currentBuild: { type: "house", days_required: 1, days_completed: 0 },
+      }),
+    );
+    expect(updates.build_order).toEqual(["5,5", "7,3", "8,1", landedAt(updates)]);
+  });
+
+  it("the asteroid leaves the order alone — a levelled lot keeps its slot", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        cityMap: standing(),
+        buildOrder: ORDER,
+        lastActivityDate: "2026-04-20",
+      }),
+    );
+    expect((updates.pending_event as { type: string } | undefined)?.type).toBe("asteroid");
+    expect(updates.build_order).toBeUndefined();
+  });
+
+  it("rowMajorBuildOrder keeps rubble and skips never-built cells", () => {
+    const m = standing();
+    m["5"][5] = "rubble";
+    expect(rowMajorBuildOrder(m)).toEqual(["5,5", "7,3", "8,1"]);
+    expect(rowMajorBuildOrder(emptyMap())).toEqual([]);
   });
 });

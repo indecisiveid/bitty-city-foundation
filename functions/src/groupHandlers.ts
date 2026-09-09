@@ -14,6 +14,7 @@ import {
   findEmptyTiles,
   findOccupiedTiles,
   STARTING_FREEZES,
+  rowMajorBuildOrder,
 } from "./gameLogic";
 import {
   generateGroupCode,
@@ -91,10 +92,28 @@ async function ensurePlanAnchor(
   return { ...data, plan_frozen_at_buildings: frozen };
 }
 
+/**
+ * Stamp `build_order` onto a doc written before it existed. Row-major is the
+ * order those cities already rendered in, so this moves nothing on screen —
+ * it only stops the NEXT landing from moving everything. Runs from every
+ * day-processing entry point (every callable the app nudges), so one open
+ * of the app is enough.
+ */
+async function ensureBuildOrder(
+  groupId: string,
+  data: FirebaseFirestore.DocumentData,
+): Promise<FirebaseFirestore.DocumentData> {
+  if (Array.isArray(data.build_order)) return data;
+  const order = rowMajorBuildOrder(data.city_map ?? {});
+  await db().collection("groups").doc(groupId).update({ build_order: order });
+  return { ...data, build_order: order };
+}
+
 async function maybeProcessDay(
   groupId: string,
   data: FirebaseFirestore.DocumentData,
 ): Promise<FirebaseFirestore.DocumentData> {
+  data = await ensureBuildOrder(groupId, data);
   const goalResetTimezone: string = data.goal_reset_timezone ?? "UTC";
   if (!needsDayProcessing(data.goal_reset_time, data.last_processed_date, goalResetTimezone)) {
     return data;
@@ -122,6 +141,7 @@ async function maybeProcessDay(
       : false,
     tileBuildDates: data.tile_build_dates ?? {},
     rubbleOrigins: data.rubble_origins ?? {},
+    buildOrder: data.build_order ?? null,
   });
 
   const writeUpdates: Record<string, unknown> = {
@@ -234,6 +254,7 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           current_build: null,
           abandoned_build: null,
           city_map: EMPTY_CITY,
+          build_order: [],
           parks: [],
           // Founded after compact growth shipped, so nothing to freeze.
           plan_frozen_at_buildings: 0,
