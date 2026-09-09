@@ -93,7 +93,7 @@ if [ -f scripts/emulator-smoke.mjs ]; then
   # emulators:exec boots auth/functions/firestore, runs the smoke, tears down.
   # (The smoke script itself assumes emulators are already listening.)
   if PATH="/opt/homebrew/opt/openjdk/bin:$PATH" $TIMEOUT npx firebase emulators:exec \
-       --only auth,functions,firestore --project "$PROJECT" \
+       --only auth,functions,firestore,storage --project "$PROJECT" \
        "node scripts/emulator-smoke.mjs" >/tmp/bc-smoke.log 2>&1; then
     echo "  smoke: $(grep -oE '[0-9]+ (checks?|passed)' /tmp/bc-smoke.log | tail -1 || echo 'passed')"
   else

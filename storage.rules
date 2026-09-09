@@ -1,0 +1,26 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Goal-completion proof photos. One object per upload, never replaced:
+    // the app records the key with completeGoal, and the server checks the
+    // object is really there. Membership is read from Firestore — the same
+    // member_uids gate the group doc itself uses.
+    match /proofs/{groupId}/{uid}/{file} {
+      function isMember() {
+        return request.auth != null
+          && request.auth.uid in firestore.get(/databases/(default)/documents/groups/$(groupId)).data.member_uids;
+      }
+      allow read: if isMember();
+      allow create: if isMember()
+        && request.auth.uid == uid
+        && file.matches('[A-Za-z0-9-]{8,64}\\.jpg')
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size <= 5 * 1024 * 1024;
+      allow update, delete: if false;
+    }
+    // Nothing else in the bucket is reachable from a client.
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

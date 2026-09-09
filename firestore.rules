@@ -7,6 +7,14 @@ service cloud.firestore {
       allow read: if request.auth != null
                   && request.auth.uid in resource.data.member_uids;
       allow write: if false;
+
+      // Per-day proof ledger (who showed their work). Members read it for
+      // "See proof"; only the server writes it (completeGoal).
+      match /days/{date} {
+        allow read: if request.auth != null
+                    && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.member_uids;
+        allow write: if false;
+      }
     }
     // Invite-code index is server-only.
     match /group_codes/{code} {

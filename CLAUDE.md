@@ -26,7 +26,9 @@ functions/src/
   utils.ts           validation, group code gen, shared response shape
   __tests__/         jest suite for gameLogic
 firestore.rules      groups readable by members only; users/{uid} owner-only;
-                     ALL writes server-only
+                     ALL writes server-only; groups/{id}/days/{date} readable by members
+storage.rules        proof photos: proofs/{groupId}/{uid}/{id}.jpg — member-read,
+                     own-uid create-only, jpeg ≤5 MiB (membership via firestore.get)
 scripts/emulator-smoke.mjs   end-to-end emulator test (see below)
 ```
 
@@ -76,7 +78,7 @@ cd functions && npm run build     # tsc — keep clean
 cd functions && npm test          # jest (gameLogic suite)
 
 # Emulators (Java via brew: PATH="/opt/homebrew/opt/openjdk/bin:$PATH")
-firebase emulators:start --only auth,functions,firestore --project bitty-city
+firebase emulators:start --only auth,functions,firestore,storage --project bitty-city
 node scripts/emulator-smoke.mjs   # 44-check end-to-end smoke
 
 npm --prefix functions run deploy # prod deploy (needs Chris/Christian creds)
