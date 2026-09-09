@@ -12,6 +12,7 @@ service firebase.storage {
       }
       allow read: if isMember();
       allow create: if isMember()
+        && resource == null
         && request.auth.uid == uid
         && file.matches('[A-Za-z0-9-]{8,64}\\.jpg')
         && request.resource.contentType == 'image/jpeg'
