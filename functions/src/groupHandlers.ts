@@ -12,6 +12,7 @@ import {
   applyBuildRescue,
   isFirstDayGrace,
   findEmptyTiles,
+  landBuild,
   STARTING_FREEZES,
   rowMajorBuildOrder,
 } from "./gameLogic";
@@ -231,6 +232,8 @@ export async function maybeProcessDay(
     // Proofs are recorded durably in days/{date}; the today bucket goes
     // with completions_today. See proofs.ts.
     proofs_today: null,
+    // The day the build landed on is over; the next pick is allowed again.
+    landed_on: null,
   };
 
   await db().collection("groups").doc(groupId).update(writeUpdates);
@@ -565,6 +568,8 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   // Set only when THIS call is the one that records a new completion (not the
   // idempotent re-tap), so we notify teammates exactly once.
   let completedName: string | null = null;
+  // The build as it stood before this call landed it (null if nothing landed).
+  let landedBuild: FirebaseFirestore.DocumentData | null = null;
 
   // Now mark completion in a transaction
   await db().runTransaction(async (tx) => {
@@ -611,10 +616,43 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     const newCompletions = [...completions, member];
     completedName = member;
     const { state: proofsToday } = applyProof(freshData.proofs_today, activityDate, member, proofEntry);
+
+    // Land the build the moment the last ACTIVE member finishes its final
+    // day — no waiting for tonight's day processing. Same roster rule the
+    // processor uses (someone on vacation is not waited for). `landed_on`
+    // keeps `selectBuild` from starting a second build off today's
+    // completions; day processing then finds no build and only logs the day.
+    const crewRoster = rosterOf(freshData);
+    const active = activeMembersOn(crewRoster, activityDate);
+    const crewDone =
+      !isDayPaused(crewRoster, activityDate) &&
+      active.length > 0 &&
+      active.every((m: string) => newCompletions.includes(m));
+    const build = freshData.current_build ?? null;
+    const landing =
+      crewDone && build && build.days_completed + 1 >= build.days_required
+        ? landBuild({
+            currentBuild: build,
+            cityMap: freshData.city_map,
+            parks: normalizeParks(freshData.parks),
+            buildOrder: freshData.build_order ?? null,
+            tileBuildDates: freshData.tile_build_dates ?? {},
+            rubbleOrigins: freshData.rubble_origins ?? {},
+            streakFreezes: freshData.streak_freezes ?? 0,
+            landedOn: activityDate,
+            nowIso: new Date().toISOString(),
+          })
+        : null;
+    landedBuild = landing ? build : null;
+    const landingUpdates: Record<string, unknown> = landing
+      ? { ...landing, landed_on: activityDate }
+      : {};
+
     tx.update(groupRef, {
       completions_today: newCompletions,
       last_activity_date: activityDate,
       proofs_today: proofsToday,
+      ...landingUpdates,
     });
     // Durable per-day ledger — what "See proof" on a building reads.
     tx.set(
@@ -627,6 +665,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       completions_today: newCompletions,
       last_activity_date: activityDate,
       proofs_today: proofsToday,
+      ...landingUpdates,
     };
   });
 
@@ -656,9 +695,14 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       });
     } else {
       // That was the last one — the whole crew is in. Celebrate the day and
-      // point at what's next. The build itself lands at day processing, which
-      // sends its own "city grew" push then.
-      await notifyAllMembers(group_id, finalData!, dayCompleteMessage(finalData!));
+      // point at what's next. If this completion landed the build, the copy
+      // already says so (dayCompleteMessage reads the build before it was
+      // cleared? — no: it reads `finalData`, so pass the pre-landing build).
+      await notifyAllMembers(
+        group_id,
+        finalData!,
+        dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!),
+      );
     }
   }
 
@@ -712,6 +756,13 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
 
     if (freshData.current_build !== null) {
       throw new HttpsError("failed-precondition", "A build is already in progress");
+    }
+
+    // A build that landed today already used today's completions; a second
+    // one would land off the same check-ins at day processing. One per day.
+    const today = getProcessingDate(freshData.goal_reset_time, freshData.goal_reset_timezone ?? "UTC");
+    if (freshData.landed_on === today) {
+      throw new HttpsError("failed-precondition", "Your city grew today — pick the next build tomorrow");
     }
 
     // Check if city is full

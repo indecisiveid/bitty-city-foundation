@@ -94,6 +94,8 @@ export function groupToResponse(
     kudos_today: data.kudos_today ?? null,
     nudges_today: data.nudges_today ?? null,
     proofs_today: data.proofs_today ?? null,
+    landed_on: data.landed_on ?? null,
+    tile_build_dates: data.tile_build_dates ?? {},
     member_pauses: data.member_pauses ?? {},
     city_pause: data.city_pause ?? null,
     paused_dates: data.paused_dates ?? [],

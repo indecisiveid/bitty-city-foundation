@@ -271,6 +271,10 @@ describe("processEndOfDay — streak on successful days", () => {
     expect(updates.pending_event?.type).toBe("build_complete");
     expect(updates.building_completions).toContain(TODAY);
     expect(updates.streak).toBe(1);
+    // The tile is stamped with the GAME DAY the crew completed on (the day
+    // before the settlement label), which is also the proof ledger's key.
+    const settled = new Date(Date.UTC(2026, 4, 3)).toISOString().slice(0, 10);
+    expect(Object.values(updates.tile_build_dates ?? {})).toEqual([settled]);
   });
 });
 
@@ -578,7 +582,10 @@ describe("processEndOfDay — tile build dates", () => {
     );
     const tile = updates.pending_event?.tile;
     expect(tile).toBeDefined();
-    expect(updates.tile_build_dates?.[`${tile![0]},${tile![1]}`]).toBe(TODAY);
+    // Stamped with the game day the crew completed on — one day before the
+    // settlement label this pass runs under — so it matches the proof ledger
+    // and what an immediate landing from completeGoal would have written.
+    expect(updates.tile_build_dates?.[`${tile![0]},${tile![1]}`]).toBe("2026-05-03");
   });
 
   it("clears the date of a tile destroyed by the meteor, keeps survivors", () => {

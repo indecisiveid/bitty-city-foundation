@@ -552,6 +552,123 @@ function makeEventId(): string {
 }
 
 // ---------------------------------------------------------------------------
+// landBuild — the moment a build becomes a building
+//
+// Pure. Used by `completeGoal` the instant the last ACTIVE crew member
+// finishes the final day of a build (landing is immediate, 2026-09-10), and
+// by `processEndOfDay` as the fallback for a day that became all-complete
+// without a completeGoal call (a roster change or a pause after the last
+// completion). `landedOn` is the GAME-DAY label the crew completed on — the
+// same label `completeGoal` writes to the proof ledger, so a building's
+// stored date opens the right day's proof.
+//
+// Returns null when there is no empty tile to land on (the caller still
+// clears `current_build`).
+// ---------------------------------------------------------------------------
+
+export interface LandBuildParams {
+  currentBuild: CurrentBuild;
+  cityMap: CityMap;
+  parks: Park[];
+  buildOrder: string[] | null;
+  tileBuildDates: Record<string, string>;
+  rubbleOrigins: Record<string, string>;
+  streakFreezes: number;
+  landedOn: string;
+  nowIso: string;
+}
+
+export interface LandBuildResult {
+  current_build: null;
+  pending_event: PendingEvent;
+  streak_freezes: number;
+  city_map?: CityMap;
+  build_order?: string[];
+  parks?: Park[];
+  tile_build_dates?: Record<string, string>;
+  rubble_origins?: Record<string, string>;
+}
+
+export function landBuild(p: LandBuildParams): LandBuildResult | null {
+  const { currentBuild, cityMap, parks, tileBuildDates, rubbleOrigins, landedOn, nowIso } = p;
+  const freezes = Math.min(FREEZE_CAP, p.streakFreezes + 1);
+  const footprint = parkFootprint(currentBuild.type);
+
+  if (footprint) {
+    // A park takes no `city_map` cell at all — it's recorded beside the grid
+    // so slot indices and the buildings count stay correct, and the CLIENT
+    // places it, because only the client knows the block plan that turns
+    // slots into positions (see parks.ts).
+    const park: Park = {
+      park_id: makeParkId(),
+      cells: (footprint.rows * footprint.cols) as 9 | 15,
+      // Anchors the park in the block sequence — see parks.ts. Counted from
+      // the grid the same way the client counts slots.
+      built_at_buildings: findOccupiedTiles(cityMap).length,
+      damage: {},
+      built_on: landedOn,
+    };
+    return {
+      current_build: null,
+      parks: [...parks, park],
+      pending_event: {
+        event_id: makeEventId(),
+        type: "build_complete",
+        building: currentBuild.type,
+        tile: [0, 0],
+        timestamp: nowIso,
+      },
+      streak_freezes: freezes,
+    };
+  }
+
+  // Building — on the repair's own lot if it has one, otherwise a random
+  // empty/rubble tile. A repair that landed anywhere else would break the
+  // only promise tapping a ruin makes.
+  const empty = findEmptyTiles(cityMap);
+  if (empty.length === 0) return null;
+  const target = currentBuild.target_tile;
+  const targetFree =
+    target != null && empty.some(([r, c]) => r === target.row && c === target.col);
+  // If the target got built on while the repair was in flight, fall back to
+  // a normal landing rather than dropping the build.
+  const tile = targetFree ? [target!.row, target!.col] : empty[Math.floor(Math.random() * empty.length)];
+  const key = `${tile[0]},${tile[1]}`;
+
+  const newMap: CityMap = Object.fromEntries(
+    Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
+  );
+  newMap[tile[0]][tile[1]] = currentBuild.type;
+
+  const result: LandBuildResult = {
+    current_build: null,
+    city_map: newMap,
+    tile_build_dates: { ...tileBuildDates, [key]: landedOn },
+    pending_event: {
+      event_id: makeEventId(),
+      type: "build_complete",
+      building: currentBuild.type,
+      tile,
+      timestamp: nowIso,
+    },
+    streak_freezes: freezes,
+  };
+  // The landing's SLOT is its place in `build_order`, never its grid cell. A
+  // repair lands on a lot that is already listed (rubble keeps its entry), so
+  // it stays put; anything else is appended — the growth frontier.
+  const order = p.buildOrder ?? rowMajorBuildOrder(cityMap);
+  if (!order.includes(key)) result.build_order = [...order, key];
+  // Something stands here again, so the lot is no longer a ruin awaiting
+  // repair — drop it from the ledger.
+  if (rubbleOrigins[key] !== undefined) {
+    const next = { ...rubbleOrigins };
+    delete next[key];
+    result.rubble_origins = next;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // processEndOfDay
 //
 // Pure function: returns a dict of fields to update on the group document.
@@ -718,80 +835,34 @@ export function processEndOfDay(params: {
       const newDays = currentBuild.days_completed + 1;
 
       if (newDays >= currentBuild.days_required) {
-        const footprint = parkFootprint(currentBuild.type);
-
-        if (footprint) {
-          // A park takes no `city_map` cell at all — it's recorded beside the
-          // grid so slot indices and the buildings count stay correct, and the
-          // CLIENT places it, because only the client knows the block plan
-          // that turns slots into positions (see parks.ts).
-          const park: Park = {
-            park_id: makeParkId(),
-            cells: (footprint.rows * footprint.cols) as 9 | 15,
-            // Anchors the park in the block sequence — see parks.ts. Counted
-            // from the grid the same way the client counts slots.
-            built_at_buildings: findOccupiedTiles(cityMap).length,
-            damage: {},
-            built_on: processingDate,
-          };
-          updates.parks = [...parks, park];
-          updates.pending_event = {
-            event_id: makeEventId(),
-            type: "build_complete",
-            building: currentBuild.type,
-            tile: [0, 0],
-            timestamp: nowIso,
-          };
-          freezes = Math.min(FREEZE_CAP, freezes + 1);
-          updates.current_build = null;
-        } else {
-        // Building complete — place on the repair's own lot if it has one,
-        // otherwise a random empty/rubble tile. A repair that landed anywhere
-        // else would break the only promise tapping a ruin makes.
-        const empty = findEmptyTiles(cityMap);
-        const target = currentBuild.target_tile;
-        const targetFree =
-          target != null &&
-          empty.some(([r, c]) => r === target.row && c === target.col);
-        if (empty.length > 0) {
-          const newMap: CityMap = Object.fromEntries(
-            Object.entries(cityMap).map(([k, row]) => [k, [...row]]),
-          );
-          // If the target got built on while the repair was in flight, fall
-          // back to a normal landing rather than dropping the build.
-          const tile = targetFree
-            ? [target!.row, target!.col]
-            : empty[Math.floor(Math.random() * empty.length)];
-          newMap[tile[0]][tile[1]] = currentBuild.type;
-          updates.city_map = newMap;
-          // The landing's SLOT is its place in `build_order`, never its grid
-          // cell. A repair lands on a lot that is already listed (rubble keeps
-          // its entry), so it stays put; anything else is appended — the
-          // growth frontier — whatever tile the lottery picked.
-          const key = `${tile[0]},${tile[1]}`;
-          const order = buildOrder ?? rowMajorBuildOrder(cityMap);
-          if (!order.includes(key)) updates.build_order = [...order, key];
-          newBuildDates[`${tile[0]},${tile[1]}`] = processingDate;
-          buildDatesChanged = true;
-          // Something stands here again, so the lot is no longer a ruin
-          // awaiting repair — drop it from the ledger.
-          if (rubbleOrigins[`${tile[0]},${tile[1]}`] !== undefined) {
-            const next = { ...rubbleOrigins };
-            delete next[`${tile[0]},${tile[1]}`];
-            updates.rubble_origins = next;
+        // Fallback landing: `completeGoal` lands immediately, so this only
+        // runs when the day became all-complete without a completion call
+        // (roster change / pause). The tile is stamped with the game day the
+        // crew completed on, matching what completeGoal would have written.
+        const landed = landBuild({
+          currentBuild,
+          cityMap,
+          parks,
+          buildOrder: buildOrder ?? null,
+          tileBuildDates: newBuildDates,
+          rubbleOrigins,
+          streakFreezes: freezes,
+          landedOn: settledGameDay,
+          nowIso,
+        });
+        if (landed) {
+          if (landed.city_map) updates.city_map = landed.city_map;
+          if (landed.build_order) updates.build_order = landed.build_order;
+          if (landed.parks) updates.parks = landed.parks;
+          if (landed.tile_build_dates) {
+            Object.assign(newBuildDates, landed.tile_build_dates);
+            buildDatesChanged = true;
           }
-          updates.pending_event = {
-            event_id: makeEventId(),
-            type: "build_complete",
-            building: currentBuild.type,
-            tile: tile,
-            timestamp: nowIso,
-          };
-          // A landing earns a streak freeze (capped)
-          freezes = Math.min(FREEZE_CAP, freezes + 1);
+          if (landed.rubble_origins) updates.rubble_origins = landed.rubble_origins;
+          updates.pending_event = landed.pending_event;
+          freezes = landed.streak_freezes;
         }
         updates.current_build = null;
-        }
       } else {
         // Build advances
         updates.current_build = {

@@ -66,6 +66,13 @@ group_ids[]}` (cross-device restore + 100-groups cap).
 - **Streak** = consecutive all-complete days ending today/yesterday, derived
   from `building_completions` (+ frozen bridge days). Recomputed every
   day-process — never incremented imperatively.
+- **Builds land immediately** (2026-09-10): `completeGoal` lands the build in
+  its own transaction the moment the last ACTIVE member finishes its final
+  day (`landBuild` in gameLogic.ts — pure, shared with the day processor's
+  fallback). `landed_on` blocks `selectBuild` until day processing clears it,
+  so one day's check-ins never land two buildings. Tiles are stamped with the
+  GAME DAY the crew completed on (= the proof ledger key), not the settlement
+  label.
 - **Day processing is lazy**: `maybeProcessDay` runs when a callable touches
   the group (the app nudges `getGroup` on open). One pass settles the whole
   gap since `last_processed_date`.

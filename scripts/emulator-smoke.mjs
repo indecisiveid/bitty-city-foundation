@@ -286,6 +286,41 @@ async function main() {
   const pgDel = await call('deleteGroup', { group_id: pg.group_id }, dev);
   check('proof city deleted', pgDel.result?.success === true, JSON.stringify(pgDel));
 
+  console.log('— immediate landing —');
+  const countBuilt = (cityMap) =>
+    Object.values(cityMap ?? {}).flat().filter((t) => t != null && t !== 'rubble').length;
+  const lc = await call(
+    'createGroup',
+    { group_name: 'Landing City', member: 'Christian', daily_goal: 'Land it', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  );
+  const lg = lc.result;
+  await call('joinGroup', { group_code: lg.group_code, member: 'Bob' }, bob);
+  await call('selectBuild', { group_id: lg.group_id, type: 'house' }, dev);
+  const firstDone = await call('completeGoal', { group_id: lg.group_id }, dev);
+  check('first completion does not land', firstDone.result?.current_build?.type === 'house' && countBuilt(firstDone.result?.city_map) === 0, JSON.stringify(firstDone.result?.current_build));
+  const lastDone = await call('completeGoal', { group_id: lg.group_id }, bob);
+  check('last completion lands the build immediately', lastDone.result?.current_build === null && countBuilt(lastDone.result?.city_map) === 1, `build=${JSON.stringify(lastDone.result?.current_build)} built=${countBuilt(lastDone.result?.city_map)}`);
+  check('landing stamps the tile with today (the proof ledger key)', Object.values(lastDone.result?.tile_build_dates ?? {})[0] === lastDone.result?.proofs_today?.date, JSON.stringify(lastDone.result?.tile_build_dates));
+  check('landing fires build_complete', lastDone.result?.pending_event?.type === 'build_complete', JSON.stringify(lastDone.result?.pending_event));
+  check('landing earns a freeze', lastDone.result?.streak_freezes === 2, `freezes=${lastDone.result?.streak_freezes}`);
+  check('landed_on is today', lastDone.result?.landed_on === lastDone.result?.proofs_today?.date, JSON.stringify(lastDone.result?.landed_on));
+  const secondPick = await call('selectBuild', { group_id: lg.group_id, type: 'house' }, dev);
+  check('no second build the same day', secondPick.error === 'FAILED_PRECONDITION', JSON.stringify(secondPick));
+  await adminPatch(
+    `groups/${lg.group_id}`,
+    { last_processed_date: { stringValue: ymdDaysAgo(1) }, created_at: { timestampValue: new Date(Date.now() - 15 * 86400000).toISOString() } },
+    ['last_processed_date', 'created_at'],
+  );
+  const settled = await call('getGroup', { group_id: lg.group_id }, dev);
+  check('day processing does not land a second building', countBuilt(settled.result?.city_map) === 1, `built=${countBuilt(settled.result?.city_map)}`);
+  check('day processing still logs the streak day', settled.result?.streak === 1, `streak=${settled.result?.streak}`);
+  check('day processing clears landed_on', settled.result?.landed_on === null, JSON.stringify(settled.result?.landed_on));
+  const nextPick = await call('selectBuild', { group_id: lg.group_id, type: 'house' }, dev);
+  check('next build allowed after day processing', nextPick.result?.current_build?.type === 'house', JSON.stringify(nextPick).slice(0, 160));
+  const lgDel = await call('deleteGroup', { group_id: lg.group_id }, dev);
+  check('landing city deleted', lgDel.result?.success === true);
+
   console.log('— kudos —');
   const kudosSelf = await call('sendKudos', { group_id: g.group_id, to_member: 'Christian' }, dev);
   check('self kudos rejected', kudosSelf.error === 'FAILED_PRECONDITION', JSON.stringify(kudosSelf));
