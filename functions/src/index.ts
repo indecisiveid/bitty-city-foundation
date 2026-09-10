@@ -25,4 +25,6 @@ export { sendKudos } from "./kudosHandlers";
 
 export { sendNudge } from "./nudgeHandlers";
 
+export { setMemberPause, setCityPause } from "./pauseHandlers";
+
 export { dailyNudge } from "./scheduled";

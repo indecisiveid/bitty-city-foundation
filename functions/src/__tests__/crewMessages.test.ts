@@ -1,4 +1,11 @@
-import { joinedMessage, leftMessage } from "../crewMessages";
+import {
+  joinedMessage,
+  leftMessage,
+  onVacationMessage,
+  backMessage,
+  cityPausedMessage,
+  cityResumedMessage,
+} from "../crewMessages";
 import { MAX_MEMBERS_PER_GROUP } from "../utils";
 
 /**
@@ -50,6 +57,43 @@ describe("leftMessage", () => {
     // the new number; anything editorial about it is not ours to add.
     const body = leftMessage("Sam", "Riverside", 2).body.toLowerCase();
     for (const editorial of ["sorry", "sadly", "unfortunately", "abandoned", "quit"]) {
+      expect(body).not.toContain(editorial);
+    }
+  });
+});
+
+describe("vacation messages", () => {
+  it("states the lowered bar and when it comes back", () => {
+    const m = onVacationMessage("Sam", "Riverside", "Sep 12", 3);
+    expect(m.title).toContain("Sam");
+    expect(m.body).toContain("Sep 12");
+    expect(m.body).toContain("3 completions a day");
+  });
+
+  it("says the city is paused when the last active member goes away", () => {
+    const m = onVacationMessage("Sam", "Riverside", "Sep 12", 0);
+    expect(m.body).toContain("paused");
+    expect(m.body).not.toContain("0 completions");
+  });
+
+  it("restores the bar on return", () => {
+    expect(backMessage("Sam", "Riverside", 4).body).toContain("4 completions a day");
+  });
+
+  it("names who paused the city and until when", () => {
+    const m = cityPausedMessage("Riverside", "Chris", "Sep 12");
+    expect(m.title).toContain("Riverside");
+    expect(m.body).toContain("Chris");
+    expect(m.body).toContain("Sep 12");
+  });
+
+  it("states the bar again on resume", () => {
+    expect(cityResumedMessage("Riverside", "Chris", 2).body).toContain("2 completions a day");
+  });
+
+  it("stays flat — a vacation is not a desertion", () => {
+    const body = onVacationMessage("Sam", "Riverside", "Sep 12", 2).body.toLowerCase();
+    for (const editorial of ["sorry", "sadly", "unfortunately", "abandoned", "quit", "lazy"]) {
       expect(body).not.toContain(editorial);
     }
   });

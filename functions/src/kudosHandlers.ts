@@ -14,6 +14,7 @@ import { memberNameForUid } from "./groupHandlers";
 import { applyKudos, KudosState } from "./kudos";
 import { notifyMembers } from "./notify";
 import { requireAuth } from "./auth";
+import { pausedMembersOn, rosterOf } from "./pauses";
 
 const db = () => getFirestore();
 
@@ -64,6 +65,11 @@ export const sendKudos = onCall({ enforceAppCheck: true }, async (request) => {
       data.goal_reset_time,
       data.goal_reset_timezone ?? "UTC",
     );
+    if (pausedMembersOn(rosterOf(data), today).includes(to_member)) {
+      throw new HttpsError("failed-precondition", `${to_member} is on vacation`, {
+        reason: "paused",
+      });
+    }
     const result = applyKudos(data.kudos_today, today, fromName, to_member);
     isNew = result.isNew;
     kudosState = result.state;

@@ -60,3 +60,72 @@ export function leftMessage(
       `That's ${completions(memberCount)} to keep building.`,
   };
 }
+
+// --- Vacation mode -----------------------------------------------------------
+//
+// Same reasoning as join/leave: a pause moves the bar. Someone going on
+// vacation lowers it for the rest of the crew; a city pause takes it away
+// entirely for a while. The body states the new bar, and the date it changes
+// back, because those are the two things that change what you do today.
+
+/** A member is away — the bar dropped for everyone else. */
+export function onVacationMessage(
+  name: string,
+  cityName: string,
+  untilLabel: string,
+  activeCount: number,
+): CrewMessage {
+  if (activeCount === 0) {
+    // Everyone is away now, which the game treats as a city pause.
+    return {
+      title: `🏖️ ${name} is on vacation`,
+      body:
+        `${name} is away until ${untilLabel} — that's the whole crew, ` +
+        `so ${cityName} is paused until then.`,
+    };
+  }
+  return {
+    title: `🏖️ ${name} is on vacation`,
+    body:
+      `${name} is away from ${cityName} until ${untilLabel}. ` +
+      `That's ${completions(activeCount)} to keep building until then.`,
+  };
+}
+
+/** A member is back — the bar is up again. Flat, like leftMessage. */
+export function backMessage(
+  name: string,
+  cityName: string,
+  activeCount: number,
+): CrewMessage {
+  return {
+    title: `${name} is back in ${cityName}`,
+    body: `That's ${completions(activeCount)} again, starting today.`,
+  };
+}
+
+/** The founder paused the whole city. */
+export function cityPausedMessage(
+  cityName: string,
+  byName: string,
+  untilLabel: string,
+): CrewMessage {
+  return {
+    title: `🏖️ ${cityName} is paused`,
+    body:
+      `${byName} paused the city until ${untilLabel}. ` +
+      `Nothing counts for or against ${cityName} until then.`,
+  };
+}
+
+/** …and resumed it early. */
+export function cityResumedMessage(
+  cityName: string,
+  byName: string,
+  memberCount: number,
+): CrewMessage {
+  return {
+    title: `${cityName} is back in business`,
+    body: `${byName} resumed the city. That's ${completions(memberCount)} again, starting today.`,
+  };
+}

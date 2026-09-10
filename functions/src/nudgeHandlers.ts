@@ -19,6 +19,7 @@ import { memberNameForUid } from "./groupHandlers";
 import { applyNudge, nudgeBody, NudgeState } from "./nudges";
 import { notifyMembers } from "./notify";
 import { requireAuth } from "./auth";
+import { isDayPaused, pausedMembersOn, rosterOf } from "./pauses";
 
 const db = () => getFirestore();
 
@@ -78,6 +79,19 @@ export const sendNudge = onCall({ enforceAppCheck: true }, async (request) => {
       data.goal_reset_time,
       data.goal_reset_timezone ?? "UTC",
     );
+    // Nobody is late in a paused city, and a member on vacation isn't late
+    // either — there's nothing to remind them of.
+    const roster = rosterOf(data);
+    if (isDayPaused(roster, today)) {
+      throw new HttpsError("failed-precondition", "The city is paused — nobody is late today", {
+        reason: "paused",
+      });
+    }
+    if (pausedMembersOn(roster, today).includes(to_member)) {
+      throw new HttpsError("failed-precondition", `${to_member} is on vacation`, {
+        reason: "paused",
+      });
+    }
     const result = applyNudge(data.nudges_today, today, fromName, to_member);
     isNew = result.isNew;
     nudgeState = result.state;

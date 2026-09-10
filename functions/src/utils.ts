@@ -94,6 +94,9 @@ export function groupToResponse(
     kudos_today: data.kudos_today ?? null,
     nudges_today: data.nudges_today ?? null,
     proofs_today: data.proofs_today ?? null,
+    member_pauses: data.member_pauses ?? {},
+    city_pause: data.city_pause ?? null,
+    paused_dates: data.paused_dates ?? [],
     created_at:
       data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
   };

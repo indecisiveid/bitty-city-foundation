@@ -1,6 +1,16 @@
 import { v4 as uuidv4 } from "uuid";
 import { Park, makeParkId, parkFootprint } from "./parks";
 import { DateTime } from "luxon";
+import {
+  PauseRange,
+  MemberPauses,
+  Roster,
+  activeMembersOn,
+  isDayPaused,
+  bridgeDates,
+  pausedDaysThrough,
+  addDays,
+} from "./pauses";
 import { daysFor, isKnownBuild } from "./buildCatalog";
 
 export const BUILDING_DAYS: Record<string, number> = {
@@ -132,6 +142,17 @@ export interface GroupDoc {
   build_order?: string[];
   /** Parks, recorded outside `city_map` — absent on cities that predate them. */
   parks?: Park[] | null;
+  /** Vacation mode (see pauses.ts). uid → range; absent = nobody paused. */
+  member_pauses?: MemberPauses | null;
+  /** The whole city on pause for a range of game days. */
+  city_pause?: PauseRange | null;
+  /**
+   * Game days processed as city-paused (an explicit city pause, or every
+   * member away). Append-only. Bridge days for the streak, exactly like
+   * `frozen_dates`, but kept apart so a vacation never reads as spent
+   * freezes in the stats.
+   */
+  paused_dates?: string[];
   last_processed_date: string | null;
   pending_event: PendingEvent | null;
   building_completions: string[];
@@ -153,7 +174,11 @@ export interface EndOfDayUpdates {
   streak?: number;
   streak_freezes?: number;
   frozen_dates?: string[];
+  paused_dates?: string[];
   broken_streak?: BrokenStreak | null;
+  /** Written only when a pause parks the inactivity clock — see the
+   *  meteor section of processEndOfDay. */
+  last_activity_date?: string;
   last_inactivity_meteor_date?: string;
   pending_event?: PendingEvent;
   building_completions?: string[];
@@ -579,6 +604,12 @@ export function processEndOfDay(params: {
   rubbleOrigins?: Record<string, string>;
   /** See GroupDoc.build_order. Undefined → derived row-major from the map. */
   buildOrder?: string[] | null;
+  /** Vacation mode. All optional: absent = nobody paused, so every caller
+   *  and test written before the feature behaves exactly as it did. */
+  memberUids?: string[];
+  memberPauses?: MemberPauses | null;
+  cityPause?: PauseRange | null;
+  pausedDates?: string[];
 }): EndOfDayUpdates {
   const {
     groupMembers,
@@ -598,6 +629,10 @@ export function processEndOfDay(params: {
     tileBuildDates = {},
     rubbleOrigins = {},
     buildOrder,
+    memberUids = [],
+    memberPauses = null,
+    cityPause = null,
+    pausedDates = [],
   } = params;
 
   const updates: EndOfDayUpdates = {
@@ -616,19 +651,61 @@ export function processEndOfDay(params: {
   let freezes = streakFreezes;
   let broken: BrokenStreak | null = brokenStreak;
 
-  const membersSet = new Set(groupMembers);
+  // --- Vacation mode: who counts today, and which days were paused ---
+  // The roster for the day is the ACTIVE members: someone on vacation is not
+  // asked to complete, and their absence is the only one that is free. A day
+  // with nobody active (an explicit city pause, or everyone away) is a paused
+  // day: neither won nor lost, nothing advances, nothing falls.
+  //
+  // LABELS. A pass with processing date P settles the game day that just
+  // ended — the one labelled P−1 by `getProcessingDate` while it was running
+  // (with a midnight reset, the first touch on the 9th settles the 8th's
+  // completions). Pauses are stored in those GAME-DAY labels, because that is
+  // the "today" completeGoal and the callables see. Everything this pass
+  // writes (`building_completions`, `frozen_dates`, `paused_dates`) is in
+  // SETTLEMENT labels, one day later — so a paused game day G lands in
+  // `paused_dates` as G+1, the same label space the streak bridges over.
+  const roster: Roster = { members: groupMembers, memberUids, memberPauses, cityPause };
+  const settledGameDay = addDays(processingDate, -1);
+  const activeMembers = activeMembersOn(roster, settledGameDay);
+  const dayPaused = isDayPaused(roster, settledGameDay);
+  // Lazy processing settles the whole gap since the last pass, so every paused
+  // day up to the one being settled is recorded now. Append-only, deduped.
+  const newPaused = [...pausedDates];
+  for (const g of pausedDaysThrough(roster, settledGameDay)) {
+    const label = addDays(g, 1);
+    if (!newPaused.includes(label)) newPaused.push(label);
+  }
+
   const completionsSet = new Set(completionsToday);
   const daySuccessful =
-    groupMembers.length > 0 &&
+    !dayPaused &&
+    activeMembers.length > 0 &&
     completionsToday.length > 0 &&
-    [...membersSet].every((m) => completionsSet.has(m));
+    activeMembers.every((m) => completionsSet.has(m));
 
   // Inactivity meteor decision — made up front because it supersedes the
   // standard missed-day asteroid when both would fire in the same pass.
-  const idleDays =
-    lastActivityDate !== null ? daysBetween(lastActivityDate, processingDate) : null;
+  //
+  // The idle clock does not run through a paused day: it restarts from the
+  // last one. Only once the clock has ever started (a city with no activity
+  // on record stays un-meteorable, as before) — and only city-paused days
+  // park it, because a member-only vacation leaves a crew that can still go
+  // idle.
+  const pDayNum = parseYmd(processingDate);
+  const lastPausedNum = newPaused
+    .map(parseYmd)
+    .filter((d) => d <= pDayNum)
+    .reduce<number | null>((a, d) => (a === null || d > a ? d : a), null);
+  let idleFrom = lastActivityDate;
+  if (idleFrom !== null && lastPausedNum !== null && lastPausedNum > parseYmd(idleFrom)) {
+    idleFrom = formatYmd(lastPausedNum);
+    updates.last_activity_date = idleFrom;
+  }
+  const idleDays = idleFrom !== null ? daysBetween(idleFrom, processingDate) : null;
   const meteorDue =
     !isGraceDay &&
+    !dayPaused &&
     !daySuccessful &&
     idleDays !== null &&
     idleDays >= INACTIVITY_METEOR_DAYS &&
@@ -722,8 +799,8 @@ export function processEndOfDay(params: {
           days_completed: newDays,
         };
       }
-    } else if (isGraceDay) {
-      // First-day grace: keep the build, no punishment.
+    } else if (isGraceDay || dayPaused) {
+      // First-day grace, or a paused day: keep the build, no punishment.
     } else if (meteorDue) {
       // ≥7 idle days is abandonment, not a slip: the build is simply gone
       // and the meteor (below) does the talking. No rescue offer.
@@ -835,36 +912,47 @@ export function processEndOfDay(params: {
   // Gap = days between the last active (successful or frozen) day and the
   // processed day. Lazy processing can batch several absent days into one
   // pass, so the whole gap is settled here: freeze it all or break.
+  //
+  // Paused days are bridge days but NOT "active" days here: the gap is
+  // measured from the last completed-or-frozen day, and the paused days
+  // inside it are simply not counted as missed. That is what settles days
+  // genuinely missed BEFORE a pause (they still cost a freeze or break the
+  // chain) while the pause itself costs nothing — and it runs on a paused
+  // processing day too, for exactly that reason.
   if (!isGraceDay) {
     const activeDayNums = [
       ...new Set([...newCompletions, ...newFrozen].map(parseYmd)),
     ];
-    const pDay = parseYmd(processingDate);
+    const pausedNums = new Set(newPaused.map(parseYmd));
+    const pDay = pDayNum;
     const before = activeDayNums.filter((d) => d < pDay);
     if (before.length > 0) {
       const lastActive = Math.max(...before);
-      const gapLen = pDay - 1 - lastActive; // days lastActive+1 .. pDay-1
-      if (gapLen > 0) {
+      const missed: number[] = []; // days lastActive+1 .. pDay-1, minus paused
+      for (let d = lastActive + 1; d <= pDay - 1; d++) {
+        if (!pausedNums.has(d)) missed.push(d);
+      }
+      if (missed.length > 0) {
         const preStreak = computeStreakWithFreezes(
           newCompletions,
-          newFrozen,
+          bridgeDates(newFrozen, newPaused),
           formatYmd(lastActive),
         );
         if (preStreak > 0) {
-          if (freezes >= gapLen) {
-            for (let d = lastActive + 1; d <= pDay - 1; d++) {
+          if (freezes >= missed.length) {
+            for (const d of missed) {
               const ds = formatYmd(d);
               if (!newFrozen.includes(ds)) newFrozen.push(ds);
             }
-            freezes -= gapLen;
+            freezes -= missed.length;
           } else {
             // Not enough freezes — the streak breaks, but keep a repairable
             // record. Don't burn a partial stock that can't save the chain.
             // The chain factually died the first day the yesterday-anchor
-            // failed (lastActive + 2), which may be well before this pass
-            // when lazy processing batches a long absence — only record
-            // breaks still inside the repair window.
-            const brokenOnDay = lastActive + 2;
+            // failed (the day after the first missed one), which may be well
+            // before this pass when lazy processing batches a long absence —
+            // only record breaks still inside the repair window.
+            const brokenOnDay = missed[0] + 1;
             if (pDay - brokenOnDay <= REPAIR_WINDOW_DAYS) {
               broken = {
                 value: preStreak,
@@ -884,10 +972,11 @@ export function processEndOfDay(params: {
   updates.building_completions = newCompletions;
   updates.streak_freezes = freezes;
   updates.frozen_dates = newFrozen;
+  updates.paused_dates = newPaused;
   updates.broken_streak = broken;
   updates.streak = computeStreakWithFreezes(
     newCompletions,
-    newFrozen,
+    bridgeDates(newFrozen, newPaused),
     processingDate,
   );
   if (buildDatesChanged) {
@@ -964,6 +1053,9 @@ export function applyBuildRescue(params: {
 export function applyStreakRepair(params: {
   buildingCompletions: string[];
   frozenDates: string[];
+  /** Paused days already bridge the chain; a repair must not re-label them
+   *  as spent freezes. */
+  pausedDates?: string[];
   brokenStreak: BrokenStreak | null;
   todayStr: string;
 }): {
@@ -971,7 +1063,7 @@ export function applyStreakRepair(params: {
   streak: number;
   broken_streak: null;
 } | null {
-  const { buildingCompletions, frozenDates, brokenStreak, todayStr } = params;
+  const { buildingCompletions, frozenDates, pausedDates = [], brokenStreak, todayStr } = params;
   if (!brokenStreak) return null;
   if (daysBetween(brokenStreak.broken_on, todayStr) > REPAIR_WINDOW_DAYS) {
     return null;
@@ -982,12 +1074,16 @@ export function applyStreakRepair(params: {
   const frozen = [...frozenDates];
   for (let d = lastActive + 1; d <= today - 1; d++) {
     const ds = formatYmd(d);
-    if (!frozen.includes(ds)) frozen.push(ds);
+    if (!frozen.includes(ds) && !pausedDates.includes(ds)) frozen.push(ds);
   }
 
   return {
     frozen_dates: frozen,
-    streak: computeStreakWithFreezes(buildingCompletions, frozen, todayStr),
+    streak: computeStreakWithFreezes(
+      buildingCompletions,
+      bridgeDates(frozen, pausedDates),
+      todayStr,
+    ),
     broken_streak: null,
   };
 }

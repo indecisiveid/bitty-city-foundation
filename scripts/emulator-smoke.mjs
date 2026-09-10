@@ -559,6 +559,96 @@ async function main() {
   check('auth user deleted', !!zedAuth.error, JSON.stringify(zedAuth).slice(0, 120));
   void zedJoin;
 
+  console.log('— vacation mode —');
+  // A fresh city so the seeds above can't leak in: dev founds, bob joins.
+  const vac = (await call(
+    'createGroup',
+    { group_name: 'Vacation City', member: 'Chris', daily_goal: 'Stretch', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  )).result;
+  await call('joinGroup', { group_code: vac.group_code, member: 'Bob' }, bob);
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+
+  const bobPause = await call('setMemberPause', { group_id: vac.group_id, until: inDays(2) }, bob);
+  check('member pauses themselves', bobPause.result?.member_pauses?.[bob.uid]?.until === inDays(2), JSON.stringify(bobPause).slice(0, 200));
+  check('pause starts today', bobPause.result?.member_pauses?.[bob.uid]?.from === todayUtc);
+  const bobDone = await call('completeGoal', { group_id: vac.group_id }, bob);
+  check('paused member cannot complete', bobDone.error === 'FAILED_PRECONDITION', JSON.stringify(bobDone));
+  const bobPausesDev = await call('setMemberPause', { group_id: vac.group_id, member_uid: dev.uid, until: inDays(1) }, bob);
+  check('member cannot pause someone else', bobPausesDev.error === 'PERMISSION_DENIED', JSON.stringify(bobPausesDev));
+  const bobPausesCity = await call('setCityPause', { group_id: vac.group_id, until: inDays(1) }, bob);
+  check('member cannot pause the city', bobPausesCity.error === 'PERMISSION_DENIED', JSON.stringify(bobPausesCity));
+  const evePause = await call('setMemberPause', { group_id: vac.group_id, until: inDays(1) }, eve);
+  check('outsider cannot pause', evePause.error === 'FAILED_PRECONDITION', JSON.stringify(evePause));
+  const badUntil = await call('setMemberPause', { group_id: vac.group_id, until: 'next tuesday' }, dev);
+  check('malformed until rejected', badUntil.error === 'INVALID_ARGUMENT', JSON.stringify(badUntil));
+  const longUntil = await call('setMemberPause', { group_id: vac.group_id, until: inDays(40) }, dev);
+  check('40-day pause rejected', longUntil.error === 'INVALID_ARGUMENT', JSON.stringify(longUntil));
+  const nudgePaused = await call('sendNudge', { group_id: vac.group_id, to_member: 'Bob' }, dev);
+  check('cannot remind a member on vacation', nudgePaused.error === 'FAILED_PRECONDITION', JSON.stringify(nudgePaused));
+
+  // Dev builds alone while bob is away: the day lands on the active roster.
+  // A pass dated today settles YESTERDAY's game day, so back-date the
+  // pause's start to cover it (in the app it simply starts today and
+  // covers tonight's settlement).
+  await adminPatch(
+    `groups/${vac.group_id}`,
+    { member_pauses: { mapValue: { fields: { [bob.uid]: { mapValue: { fields: { from: { stringValue: ymdDaysAgo(1) }, until: { stringValue: inDays(2) }, set_by: { stringValue: bob.uid } } } } } } } },
+    ['member_pauses'],
+  );
+  await call('selectBuild', { group_id: vac.group_id, type: 'house' }, dev);
+  const devDone = await call('completeGoal', { group_id: vac.group_id }, dev);
+  check('active member completes', devDone.result?.completions_today?.includes('Chris'), JSON.stringify(devDone).slice(0, 200));
+  await adminPatch(
+    `groups/${vac.group_id}`,
+    { last_processed_date: { stringValue: ymdDaysAgo(1) }, created_at: { timestampValue: new Date(Date.now() - 15 * 86400000).toISOString() } },
+    ['last_processed_date', 'created_at'],
+  );
+  const landed = await call('getGroup', { group_id: vac.group_id }, dev);
+  check('build lands without the paused member', landed.result?.pending_event?.type === 'build_complete', JSON.stringify(landed.result?.pending_event));
+  check('streak counts the day', landed.result?.streak === 1, `streak=${landed.result?.streak}`);
+  check('no paused day recorded for a member-only vacation', (landed.result?.paused_dates ?? []).length === 0, JSON.stringify(landed.result?.paused_dates));
+
+  const bobBack = await call('setMemberPause', { group_id: vac.group_id, until: null }, bob);
+  // The pause covered yesterday, so it's kept on record and ends there.
+  check("I'm back ends the pause as of today", bobBack.result?.member_pauses?.[bob.uid]?.until === ymdDaysAgo(1), JSON.stringify(bobBack.result?.member_pauses));
+
+  // Founder pauses the whole city; an idle streak survives and no meteor falls.
+  const cityPause = await call('setCityPause', { group_id: vac.group_id, until: inDays(3) }, dev);
+  check('founder pauses the city', cityPause.result?.city_pause?.until === inDays(3), JSON.stringify(cityPause).slice(0, 200));
+  const devDonePaused = await call('completeGoal', { group_id: vac.group_id }, dev);
+  check('nobody can complete in a paused city', devDonePaused.error === 'FAILED_PRECONDITION', JSON.stringify(devDonePaused));
+  const pausedSeed = {
+    building_completions: { arrayValue: { values: [{ stringValue: ymdDaysAgo(2) }, { stringValue: ymdDaysAgo(1) }] } },
+    frozen_dates: { arrayValue: {} },
+    paused_dates: { arrayValue: {} },
+    streak_freezes: { integerValue: '1' },
+    completions_today: { arrayValue: {} },
+    last_processed_date: { stringValue: ymdDaysAgo(1) },
+    last_activity_date: { stringValue: ymdDaysAgo(9) },
+    last_inactivity_meteor_date: { nullValue: null },
+    pending_event: { nullValue: null },
+    current_build: { mapValue: { fields: { type: { stringValue: 'house' }, days_required: { integerValue: '3' }, days_completed: { integerValue: '1' } } } },
+    // Same back-dating as above: the pass settles yesterday's game day.
+    city_pause: { mapValue: { fields: { from: { stringValue: ymdDaysAgo(1) }, until: { stringValue: inDays(3) }, set_by: { stringValue: dev.uid } } } },
+  };
+  await adminPatch(`groups/${vac.group_id}`, pausedSeed, Object.keys(pausedSeed));
+  const afterPaused = await call('getGroup', { group_id: vac.group_id }, dev);
+  check('paused day recorded', afterPaused.result?.paused_dates?.includes(todayUtc), JSON.stringify(afterPaused.result?.paused_dates));
+  check('streak bridges the paused day', afterPaused.result?.streak === 2, `streak=${afterPaused.result?.streak}`);
+  check('no freeze burned', afterPaused.result?.streak_freezes === 1);
+  check('no meteor on a paused city', afterPaused.result?.pending_event === null, JSON.stringify(afterPaused.result?.pending_event));
+  check('build neither advanced nor stalled', afterPaused.result?.current_build?.days_completed === 1 && afterPaused.result?.abandoned_build === null, JSON.stringify(afterPaused.result?.current_build));
+  check('idle clock parked at the paused day', afterPaused.result?.last_activity_date === todayUtc, afterPaused.result?.last_activity_date);
+
+  const resumed = await call('setCityPause', { group_id: vac.group_id, until: null }, dev);
+  check('resume keeps the covered day and ends yesterday', resumed.result?.city_pause?.until === ymdDaysAgo(1), JSON.stringify(resumed.result?.city_pause));
+  const devDoneAgain = await call('completeGoal', { group_id: vac.group_id }, dev);
+  check('completions work again after resume', devDoneAgain.result?.completions_today?.includes('Chris'), JSON.stringify(devDoneAgain).slice(0, 200));
+  // Leave no city behind — the account-deletion checks count dev's cities.
+  await call('deleteGroup', { group_id: vac.group_id }, dev);
+
   console.log('— profile upsert —');
   const upsert = await call('upsertProfile', { display_name: '  Chrisso  ' }, dev);
   check('upsertProfile trims + returns', upsert.result?.display_name === 'Chrisso', JSON.stringify(upsert));

@@ -1067,3 +1067,201 @@ describe("build_order — a landing's slot is its place in the list, not its cel
     expect(rowMajorBuildOrder(emptyMap())).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Vacation mode — see docs/superpowers/specs/2026-09-09-vacation-mode-design.md
+// ---------------------------------------------------------------------------
+
+describe("processEndOfDay — vacation mode", () => {
+  const UIDS = ["u-alice", "u-bob"];
+  // A pass dated TODAY settles YESTERDAY's game day, so a pause has to
+  // cover yesterday to affect it — see the LABELS note in processEndOfDay.
+  const day = (n: number) => `2026-05-${String(n).padStart(2, "0")}`;
+  const april = (n: number) => `2026-04-${String(n).padStart(2, "0")}`;
+
+  it("lets the day succeed on the active roster when a member is away", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        memberUids: UIDS,
+        memberPauses: { "u-bob": { from: day(3), until: day(6) } },
+        completionsToday: ["alice"],
+        currentBuild: { type: "house_a", days_required: 3, days_completed: 0 },
+      }),
+    );
+    expect(updates.building_completions).toContain(TODAY);
+    expect(updates.streak).toBe(1);
+    expect(updates.current_build?.days_completed).toBe(1);
+    expect(updates.abandoned_build).toBeUndefined();
+    expect(updates.paused_dates).toEqual([]);
+  });
+
+  it("still needs every ACTIVE member — a paused member's absence is the only free one", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        groupMembers: ["alice", "bob", "cara"],
+        memberUids: [...UIDS, "u-cara"],
+        memberPauses: { "u-bob": { from: day(3), until: day(6) } },
+        completionsToday: ["alice"],
+        currentBuild: { type: "house_a", days_required: 3, days_completed: 0 },
+      }),
+    );
+    expect(updates.building_completions).not.toContain(TODAY);
+    expect(updates.abandoned_build?.type).toBe("house_a");
+  });
+
+  it("ignores a paused member's own completion rather than counting it", () => {
+    // Bob tapped done this morning and paused at noon: the bar is alice
+    // alone, and bob's name sitting in completions changes nothing.
+    const updates = processEndOfDay(
+      baseParams({
+        memberUids: UIDS,
+        memberPauses: { "u-bob": { from: day(3), until: day(3) } },
+        completionsToday: ["bob"],
+      }),
+    );
+    expect(updates.building_completions).not.toContain(TODAY);
+  });
+
+  it("treats a day when everyone is away as a paused day", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        memberUids: UIDS,
+        memberPauses: {
+          "u-alice": { from: day(3), until: day(6) },
+          "u-bob": { from: day(3), until: day(6) },
+        },
+        currentBuild: { type: "house_a", days_required: 3, days_completed: 1 },
+        buildingCompletions: [day(2), day(3)],
+      }),
+    );
+    expect(updates.paused_dates).toEqual([TODAY]);
+    // Build neither advanced nor stalled.
+    expect(updates.current_build).toBeUndefined();
+    expect(updates.abandoned_build).toBeUndefined();
+    expect(updates.pending_event).toBeUndefined();
+    // The streak bridges the paused day.
+    expect(updates.streak).toBe(2);
+    expect(updates.streak_freezes).toBe(0);
+  });
+
+  it("does not drop a meteor on a city that has been paused for ten idle days", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        memberUids: UIDS,
+        cityPause: { from: april(23), until: day(10) },
+        cityMap: mapWithHouses(9),
+        lastActivityDate: april(23),
+      }),
+    );
+    expect(updates.pending_event).toBeUndefined();
+    expect(updates.last_inactivity_meteor_date).toBeUndefined();
+    // The idle clock is parked at the paused day.
+    expect(updates.last_activity_date).toBe(TODAY);
+  });
+
+  it("settles a lazily-processed ten-day city pause with no freeze burned and the streak intact", () => {
+    // Completed Apr 23–24 (labels), city paused game days Apr 24 – May 2
+    // (labels Apr 25 – May 3), nobody opened the app; May 3 everyone
+    // completes and the pass dated May 4 settles it all at once.
+    const updates = processEndOfDay(
+      baseParams({
+        memberUids: UIDS,
+        cityPause: { from: april(24), until: day(2) },
+        completionsToday: ["alice", "bob"],
+        buildingCompletions: [april(23), april(24)],
+        streakFreezes: 1,
+      }),
+    );
+    expect(updates.paused_dates).toEqual([
+      april(25), april(26), april(27), april(28), april(29), april(30),
+      day(1), day(2), day(3),
+    ]);
+    expect(updates.streak_freezes).toBe(1);
+    expect(updates.frozen_dates).toEqual([]);
+    expect(updates.broken_streak).toBeNull();
+    expect(updates.streak).toBe(3);
+  });
+
+  it("still settles missed days that came BEFORE a pause", () => {
+    // Completed Apr 30 (label), missed the next two days, then everyone
+    // paused for the two game days settled as May 3–4. Two freezes cover the
+    // two genuinely missed days; the paused ones cost nothing.
+    const params = baseParams({
+      memberUids: UIDS,
+      memberPauses: {
+        "u-alice": { from: day(2), until: day(3) },
+        "u-bob": { from: day(2), until: day(3) },
+      },
+      buildingCompletions: [april(30)],
+      streakFreezes: 2,
+    });
+    const updates = processEndOfDay(params);
+    expect(updates.frozen_dates).toEqual([day(1), day(2)]);
+    expect(updates.streak_freezes).toBe(0);
+    expect(updates.paused_dates).toEqual([day(3), day(4)]);
+    expect(updates.streak).toBe(1);
+
+    // Without freezes the chain breaks on the first missed day, not on the
+    // pause — and the record points at the right days.
+    const broken = processEndOfDay({ ...params, streakFreezes: 0 });
+    expect(broken.broken_streak).toEqual({
+      value: 1,
+      broken_on: day(2),
+      last_active_date: april(30),
+    });
+  });
+
+  it("restarts the meteor countdown from the last paused day", () => {
+    // Last real activity Apr 20; city paused through the game day settled
+    // as Apr 30; today is May 4 with nobody done. Idle since the pause
+    // ended = 4 days, not 14.
+    const updates = processEndOfDay(
+      baseParams({
+        memberUids: UIDS,
+        cityPause: { from: april(24), until: april(29) },
+        cityMap: mapWithHouses(9),
+        lastActivityDate: april(20),
+      }),
+    );
+    expect(updates.pending_event).toBeUndefined();
+    expect(updates.last_activity_date).toBe(april(30));
+  });
+
+  it("carries paused days it already knew about into the streak", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: ["alice", "bob"],
+        buildingCompletions: [day(1)],
+        pausedDates: [day(2), day(3)],
+      }),
+    );
+    expect(updates.paused_dates).toEqual([day(2), day(3)]);
+    expect(updates.streak).toBe(2);
+  });
+
+  it("does not let a member-only vacation stop the meteor for the crew that stayed", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        memberUids: UIDS,
+        memberPauses: { "u-bob": { from: april(20), until: day(10) } },
+        cityMap: mapWithHouses(9),
+        lastActivityDate: april(27),
+      }),
+    );
+    expect(updates.pending_event?.cause).toBe("inactivity");
+  });
+});
+
+describe("applyStreakRepair — vacation mode", () => {
+  it("does not label paused days as spent freezes", () => {
+    const result = applyStreakRepair({
+      buildingCompletions: ["2026-04-28", "2026-04-29"],
+      frozenDates: [],
+      pausedDates: ["2026-05-01"],
+      brokenStreak: { value: 2, broken_on: "2026-05-01", last_active_date: "2026-04-29" },
+      todayStr: TODAY,
+    });
+    expect(result?.frozen_dates).toEqual(["2026-04-30", "2026-05-02", "2026-05-03"]);
+    expect(result?.streak).toBe(2);
+  });
+});

@@ -30,6 +30,7 @@ import { decideNudge, SlotId } from "./reminderLogic";
 import { notifyUids, uidsForNames } from "./notify";
 import { buildProgressOf } from "./buildings";
 import { consolidate, NudgeEntry } from "./nudgeMessages";
+import { activeMembersOn, isDayPaused, rosterOf } from "./pauses";
 
 // Re-exported: the copy moved to nudgeMessages.ts, callers and tests did not.
 export { messageFor } from "./nudgeMessages";
@@ -59,8 +60,15 @@ async function runNudges(): Promise<void> {
       if (!now.isValid) return;
 
       const todayGameDate = getProcessingDate(data.goal_reset_time ?? "00:00", tz);
-      const members: string[] = data.group_members ?? [];
-      const completions: string[] = data.completions_today ?? [];
+      // Vacation mode: a paused city has nothing to nudge about (and its
+      // meteor can't fall, so no warning either), and a member on vacation
+      // is neither reminded nor counted against the crew.
+      const roster = rosterOf(data);
+      if (isDayPaused(roster, todayGameDate)) return;
+      const members: string[] = activeMembersOn(roster, todayGameDate);
+      const completions: string[] = (data.completions_today ?? []).filter((m: string) =>
+        members.includes(m),
+      );
       const lastActivity: string | null = data.last_activity_date ?? null;
       const lastMeteor: string | null = data.last_inactivity_meteor_date ?? null;
       const sentDate: string | null = data.reminders_sent_date ?? null;

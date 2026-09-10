@@ -73,6 +73,8 @@ export const demoAsteroid = onCall({ enforceAppCheck: true }, async (request) =>
     // the group's freeze stock (found in the 2026-07-08 simulator E2E).
     streakFreezes: data.streak_freezes ?? 0,
     frozenDates: data.frozen_dates ?? [],
+    // Same for paused days — the strike must not wipe the vacation ledger.
+    pausedDates: data.paused_dates ?? [],
     brokenStreak: data.broken_streak ?? null,
     // Backdate activity so the INACTIVITY METEOR fires.
     //
