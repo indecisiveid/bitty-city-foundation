@@ -23,6 +23,10 @@ functions/src/
   demoHandlers.ts    Dev-only callables (demoAsteroid/FillCity/SetBuildings/
                      ResetCity) — deployed but email-allowlisted
   auth.ts            requireAuth / requireDemoAccess (+ DEMO_ALLOWLIST param)
+  proofs.ts          PURE goal-proof logic — key shape (proofs/{g}/{uid}/{id}.jpg),
+                     date-stamped proofs_today bucket (mirrors kudos.ts)
+  proofStorage.ts    Admin-SDK check that a claimed proof object really exists
+                     (bucket from PROOFS_BUCKET param)
   utils.ts           validation, group code gen, shared response shape
   __tests__/         jest suite for gameLogic
 firestore.rules      groups readable by members only; users/{uid} owner-only;
@@ -45,7 +49,14 @@ last_active_date} | null`, `last_activity_date`,
 JSON, never nested arrays** — Firestore rejects them),
 `last_processed_date`, `pending_event` (has `cause: missed_day|inactivity`
 on asteroids), `building_completions: string[]` (every all-complete day),
-`created_at`.
+`proofs_today: {date, entries: {[name]: {status: photo|skipped, key?}}} | null`
+(today's goal proofs, cleared at rollover), `created_at`.
+
+`groups/{id}/days/{YYYY-MM-DD}` → `{proofs: {[name]: {status, key?, at}}}` —
+durable proof ledger, written by `completeGoal`, member-readable (the app's
+"See proof" reads it directly + resolves photo URLs with the Storage SDK).
+Photos live in Storage at `proofs/{groupId}/{uid}/{random}.jpg` behind
+`storage.rules` (member-read, own-uid create-only, jpeg ≤5 MiB).
 
 `group_codes/{CODE}` → `{group_id}`. `users/{uid}` → `{display_name,
 group_ids[]}` (cross-device restore + 100-groups cap).
@@ -77,7 +88,9 @@ group_ids[]}` (cross-device restore + 100-groups cap).
 cd functions && npm run build     # tsc — keep clean
 cd functions && npm test          # jest (gameLogic suite)
 
-# Emulators (Java via brew: PATH="/opt/homebrew/opt/openjdk/bin:$PATH")
+# Emulators (Java via brew: PATH="/opt/homebrew/opt/openjdk/bin:$PATH").
+# The emulator PROMPTS for any param missing from functions/.env (even with a
+# default) — add --non-interactive so a missing one fails instead of hanging.
 firebase emulators:start --only auth,functions,firestore,storage --project bitty-city
 node scripts/emulator-smoke.mjs   # 44-check end-to-end smoke
 
@@ -85,5 +98,5 @@ npm --prefix functions run deploy # prod deploy (needs Chris/Christian creds)
 ```
 
 `DEMO_ALLOWLIST` (comma-separated emails allowed to call demo functions)
-comes from `functions/.env` locally (see `functions/.env.example`) / a
+and `PROOFS_BUCKET` come from `functions/.env` locally (see `functions/.env.example`) / a
 functions param in prod.
