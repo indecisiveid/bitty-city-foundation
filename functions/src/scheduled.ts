@@ -31,6 +31,7 @@ import { notifyUids, uidsForNames } from "./notify";
 import { buildProgressOf } from "./buildings";
 import { consolidate, NudgeEntry } from "./nudgeMessages";
 import { activeMembersOn, isDayPaused, rosterOf } from "./pauses";
+import { normalizeGameMode } from "./gameMode";
 
 // Re-exported: the copy moved to nudgeMessages.ts, callers and tests did not.
 export { messageFor } from "./nudgeMessages";
@@ -84,6 +85,7 @@ async function runNudges(): Promise<void> {
         streak: data.streak ?? 0,
         idleDays: lastActivity ? daysBetween(lastActivity, todayGameDate) : null,
         daysSinceMeteor: lastMeteor ? daysBetween(lastMeteor, todayGameDate) : null,
+        gameMode: normalizeGameMode(data.game_mode),
       });
 
       if (!nudge) return;

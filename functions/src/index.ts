@@ -17,7 +17,14 @@ export {
   deleteAccount,
 } from "./groupHandlers";
 
-export { demoAsteroid, demoFillCity, demoSetBuildings, demoResetCity, demoShowcaseCity } from "./demoHandlers";
+export {
+  demoAsteroid,
+  demoFillCity,
+  demoSetBuildings,
+  demoResetCity,
+  demoShowcaseCity,
+  demoSetNearMisses,
+} from "./demoHandlers";
 
 export { registerPushToken, unregisterPushToken, sendTestPush } from "./notificationHandlers";
 
@@ -26,5 +33,7 @@ export { sendKudos } from "./kudosHandlers";
 export { sendNudge } from "./nudgeHandlers";
 
 export { setMemberPause, setCityPause } from "./pauseHandlers";
+
+export { setGameMode, dismissModeSuggestion } from "./modeHandlers";
 
 export { dailyNudge } from "./scheduled";

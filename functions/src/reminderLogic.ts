@@ -44,6 +44,7 @@
  *   reminder → plain "don't forget today's goal"                  → same
  */
 import { INACTIVITY_METEOR_DAYS } from "./gameLogic";
+import { GameMode } from "./gameMode";
 
 export type SlotId = "morning" | "midday" | "evening" | "lastCall";
 
@@ -77,6 +78,13 @@ export interface NudgeInput {
   idleDays: number | null;
   /** Whole days since the last inactivity meteor landed, or null if never. */
   daysSinceMeteor: number | null;
+  /**
+   * How the city counts a day. In easy mode a single completion already
+   * keeps the streak, so "streak on the line" is only true while NOBODY has
+   * finished; after that the late members get the plain reminder. Absent =
+   * hard, the v1.0 rule.
+   */
+  gameMode?: GameMode;
 }
 
 export interface Nudge {
@@ -155,7 +163,9 @@ export function decideNudge(input: NudgeInput): Nudge | null {
   // make a difference.
   const recipients: Nudge["recipients"] = slot === "lastCall" ? "all" : "incomplete";
 
-  if (input.streak > 0) return { kind: "streak", recipients, slot };
+  const streakAtRisk =
+    input.streak > 0 && ((input.gameMode ?? "hard") === "hard" || input.completedCount === 0);
+  if (streakAtRisk) return { kind: "streak", recipients, slot };
 
   return { kind: "reminder", recipients, slot };
 }

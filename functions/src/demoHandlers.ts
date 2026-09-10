@@ -12,6 +12,8 @@ import { EMPTY_CITY, GRID_ROWS, GRID_COLS, groupToResponse } from "./utils";
 import { requireDemoAccess } from "./auth";
 import { buildableIds } from "./buildCatalog";
 import { normalizeParks } from "./parks";
+import { maybeSuggestEasyMode } from "./groupHandlers";
+import { NEAR_MISS_THRESHOLD } from "./gameMode";
 
 const db = () => getFirestore();
 
@@ -368,4 +370,46 @@ export const demoResetCity = onCall({ enforceAppCheck: true }, async (request) =
 
   const updatedSnap = await groupRef.get();
   return groupToResponse(group_id, updatedSnap.data()!);
+});
+
+// --- demoSetNearMisses ---
+// Stage the "hard mode's been rough" state: three recent near misses on a
+// hard-mode city, then run the SAME evaluation the settlement pass runs, so
+// the push and the suggestion sheet are exercised end to end rather than
+// faked on the client.
+
+export const demoSetNearMisses = onCall({ enforceAppCheck: true }, async (request) => {
+  requireDemoAccess(request);
+  const { group_id } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  const data = snap.data()!;
+  const processingDate = getProcessingDate(
+    data.goal_reset_time,
+    data.goal_reset_timezone ?? "UTC",
+  );
+  // The last N settlement labels, ending today's.
+  const nearMisses = Array.from({ length: NEAR_MISS_THRESHOLD }, (_, i) =>
+    daysBefore(processingDate, NEAR_MISS_THRESHOLD - 1 - i),
+  );
+  const staged = {
+    game_mode: "hard",
+    near_miss_dates: nearMisses,
+    // Cleared so the cooldown can't swallow the demo.
+    mode_suggestion: null,
+  };
+  await groupRef.update(staged);
+
+  const after = await maybeSuggestEasyMode(group_id, { ...data, ...staged }, processingDate);
+  return groupToResponse(group_id, after);
 });

@@ -1,4 +1,5 @@
 import { HttpsError } from "firebase-functions/v2/https";
+import { normalizeGameMode } from "./gameMode";
 
 const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -99,6 +100,10 @@ export function groupToResponse(
     member_pauses: data.member_pauses ?? {},
     city_pause: data.city_pause ?? null,
     paused_dates: data.paused_dates ?? [],
+    // Absent on cities founded before modes existed → hard, the rules they
+    // have always played by. See gameMode.ts.
+    game_mode: normalizeGameMode(data.game_mode),
+    mode_suggestion: data.mode_suggestion ?? null,
     created_at:
       data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
   };

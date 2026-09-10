@@ -12,6 +12,7 @@ import {
   addDays,
 } from "./pauses";
 import { daysFor, isKnownBuild } from "./buildCatalog";
+import { GameMode, dayShare, isBuildFinished, snapProgress, pruneNearMisses } from "./gameMode";
 
 export const BUILDING_DAYS: Record<string, number> = {
   house: 1,
@@ -67,6 +68,10 @@ export type CityMap = Record<string, (string | null)[]>;
 export interface CurrentBuild {
   type: string;
   days_required: number;
+  /**
+   * Days banked. A whole number in hard mode; in easy mode each completion
+   * adds its share of a day, so this may be fractional (see gameMode.ts).
+   */
   days_completed: number;
   /**
    * Land this build on THIS lot instead of a random one.
@@ -146,6 +151,14 @@ export interface GroupDoc {
   member_pauses?: MemberPauses | null;
   /** The whole city on pause for a range of game days. */
   city_pause?: PauseRange | null;
+  /** How a day counts — see gameMode.ts. Absent = hard (the v1.0 rules). */
+  game_mode?: GameMode;
+  /**
+   * Hard mode only: settlement labels of days where SOMEONE finished but not
+   * everyone. Trailing window, pruned each pass. Feeds the easy-mode
+   * suggestion (gameMode.shouldSuggestEasyMode).
+   */
+  near_miss_dates?: string[];
   /**
    * Game days processed as city-paused (an explicit city pause, or every
    * member away). Append-only. Bridge days for the streak, exactly like
@@ -176,6 +189,8 @@ export interface EndOfDayUpdates {
   frozen_dates?: string[];
   paused_dates?: string[];
   broken_streak?: BrokenStreak | null;
+  /** Written when the near-miss ledger changed (hard mode). */
+  near_miss_dates?: string[];
   /** Written only when a pause parks the inactivity clock — see the
    *  meteor section of processEndOfDay. */
   last_activity_date?: string;
@@ -679,8 +694,12 @@ export function landBuild(p: LandBuildParams): LandBuildResult | null {
 // caller so that `last_processed_date` and `building_completions` entries
 // are guaranteed to use the same day boundary.
 //
-// Semantics (2026-07-08):
-// - Every day on which ALL members completed the goal is logged in
+// Semantics (2026-07-08, game modes 2026-09-10):
+// - A day is "successful" per the city's game mode (gameMode.dayShare): in
+//   hard mode when ALL active members completed, in easy mode when ANY did —
+//   and in easy mode the build advances by the completed fraction of the
+//   roster rather than a whole day. Everything below keys off that one flag.
+// - Every successful day is logged in
 //   `building_completions`, whether the active build landed or merely
 //   advanced — so the streak keeps climbing through multi-day builds.
 //   (Before this change only landing days were logged, which dropped the
@@ -727,6 +746,10 @@ export function processEndOfDay(params: {
   memberPauses?: MemberPauses | null;
   cityPause?: PauseRange | null;
   pausedDates?: string[];
+  /** How the day counts. Absent = hard, so every caller and test written
+   *  before the feature behaves exactly as it did. */
+  gameMode?: GameMode;
+  nearMissDates?: string[];
 }): EndOfDayUpdates {
   const {
     groupMembers,
@@ -750,6 +773,8 @@ export function processEndOfDay(params: {
     memberPauses = null,
     cityPause = null,
     pausedDates = [],
+    gameMode = "hard",
+    nearMissDates = [],
   } = params;
 
   const updates: EndOfDayUpdates = {
@@ -795,11 +820,27 @@ export function processEndOfDay(params: {
   }
 
   const completionsSet = new Set(completionsToday);
-  const daySuccessful =
-    !dayPaused &&
-    activeMembers.length > 0 &&
-    completionsToday.length > 0 &&
-    activeMembers.every((m) => completionsSet.has(m));
+  const completedActive = activeMembers.filter((m) => completionsSet.has(m)).length;
+  // --- Game mode: how much of the day the roster banked ---
+  // Hard: 1 when everyone completed, else 0. Easy: each completion is a share
+  // of the day (gameMode.dayShare). Either way, a share of 0 is a missed day
+  // and everything below that punishes a miss keys off `daySuccessful`.
+  const share = dayPaused ? 0 : dayShare(gameMode, completedActive, activeMembers.length);
+  const daySuccessful = share > 0;
+  // Hard mode's near miss: someone finished, not everyone. The one day easy
+  // mode would have banked — counted so the app can suggest the switch.
+  const nearMiss =
+    gameMode === "hard" && !dayPaused && !isGraceDay && !daySuccessful && completedActive > 0;
+  const newNearMisses = pruneNearMisses(
+    nearMiss ? [...nearMissDates, processingDate] : nearMissDates,
+    processingDate,
+  );
+  if (
+    newNearMisses.length !== nearMissDates.length ||
+    newNearMisses.some((d, i) => d !== nearMissDates[i])
+  ) {
+    updates.near_miss_dates = newNearMisses;
+  }
 
   // Inactivity meteor decision — made up front because it supersedes the
   // standard missed-day asteroid when both would fire in the same pass.
@@ -832,9 +873,10 @@ export function processEndOfDay(params: {
   // --- Build progression / standard asteroid ---
   if (currentBuild !== null) {
     if (daySuccessful) {
-      const newDays = currentBuild.days_completed + 1;
+      // Snapped, so three thirds land as exactly one day (see gameMode.ts).
+      const newDays = snapProgress(currentBuild.days_completed + share);
 
-      if (newDays >= currentBuild.days_required) {
+      if (isBuildFinished(newDays, currentBuild.days_required)) {
         // Fallback landing: `completeGoal` lands immediately, so this only
         // runs when the day became all-complete without a completion call
         // (roster change / pause). The tile is stamped with the game day the

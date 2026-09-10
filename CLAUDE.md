@@ -17,6 +17,10 @@ functions/src/
   gameLogic.ts       PURE game rules — streaks (+freezes/repair), end-of-day
                      processing, asteroids, 7-day inactivity meteor,
                      first-day grace. Jest-tested; keep it pure.
+  gameMode.ts        PURE — easy/hard mode: how much of a day a roster banks
+                     (dayShare), fractional-progress snapping, the near-miss
+                     ledger + "try easy mode" suggestion rule.
+  modeHandlers.ts    Callables: setGameMode (any member), dismissModeSuggestion
   groupHandlers.ts   Callables: createGroup, joinGroup, getGroup,
                      completeGoal, selectBuild, deleteGroup, leaveGroup,
                      repairStreak, upsertProfile
@@ -48,9 +52,12 @@ last_active_date} | null`, `last_activity_date`,
 `last_inactivity_meteor_date`, `current_build`, `city_map` (**row-keyed
 JSON, never nested arrays** — Firestore rejects them),
 `last_processed_date`, `pending_event` (has `cause: missed_day|inactivity`
-on asteroids), `building_completions: string[]` (every all-complete day),
+on asteroids), `building_completions: string[]` (every successful day),
 `proofs_today: {date, entries: {[name]: {status: photo|skipped, key?}}} | null`
-(today's goal proofs, cleared at rollover), `created_at`.
+(today's goal proofs, cleared at rollover), `game_mode: "easy"|"hard"` (absent = hard), `near_miss_dates: string[]`
+(hard mode: settlement labels where someone-but-not-everyone finished),
+`mode_suggestion: {suggested_on, near_misses, dismissed_by[]} | null`,
+`created_at`.
 
 `groups/{id}/days/{YYYY-MM-DD}` → `{proofs: {[name]: {status, key?, at}}}` —
 durable proof ledger, written by `completeGoal`, member-readable (the app's
@@ -63,7 +70,14 @@ group_ids[]}` (cross-device restore + 100-groups cap).
 
 ## Game rules (the parts that bite)
 
-- **Streak** = consecutive all-complete days ending today/yesterday, derived
+- **Game mode** (`gameMode.ts`) decides what a successful day IS. Hard
+  (default, the v1.0 rules): every active member completes → the build
+  advances 1 day. Easy: each completion adds `1/active` of a day, so
+  `current_build.days_completed` may be **fractional**; a day with any
+  completion is successful, a day with none is a miss in both modes. Easy
+  can never outpace hard. Three hard-mode near misses in 7 days raise
+  `mode_suggestion` (+ one push), cooldown 14 days.
+- **Streak** = consecutive successful days ending today/yesterday, derived
   from `building_completions` (+ frozen bridge days). Recomputed every
   day-process — never incremented imperatively.
 - **Builds land immediately** (2026-09-10): `completeGoal` lands the build in

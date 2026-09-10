@@ -40,7 +40,9 @@ export function buildProgressOf(currentBuild: unknown): BuildProgress | null {
   const daysRequired = build.days_required ?? daysFor(type) ?? 0;
   if (daysRequired < 2) return null;
 
-  const daysCompleted = build.days_completed ?? 0;
+  // Floored: easy mode banks fractions of a day (gameMode.ts), and the day
+  // in flight is the one after the last WHOLE day banked.
+  const daysCompleted = Math.floor(build.days_completed ?? 0);
   // Clamp: a finished-but-not-yet-processed build shouldn't read "Day 4 of 3".
   const dayNumber = Math.min(daysCompleted + 1, daysRequired);
 

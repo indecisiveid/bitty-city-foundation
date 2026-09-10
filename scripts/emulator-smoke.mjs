@@ -684,6 +684,78 @@ async function main() {
   // Leave no city behind — the account-deletion checks count dev's cities.
   await call('deleteGroup', { group_id: vac.group_id }, dev);
 
+  console.log('— game mode —');
+  // Founded explicitly easy; an old binary that sends nothing founds hard.
+  const easyCity = (await call(
+    'createGroup',
+    { group_name: 'Easy City', member: 'Chris', daily_goal: 'Stretch', goal_reset_time: '00:00', goal_reset_timezone: 'UTC', game_mode: 'easy' },
+    dev,
+  )).result;
+  check('createGroup stores game_mode', easyCity?.game_mode === 'easy', JSON.stringify(easyCity).slice(0, 200));
+  const legacyCity = (await call(
+    'createGroup',
+    { group_name: 'Legacy City', member: 'Chris', daily_goal: 'Stretch', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  )).result;
+  check('createGroup without game_mode → hard', legacyCity?.game_mode === 'hard', JSON.stringify(legacyCity).slice(0, 200));
+  await call('deleteGroup', { group_id: legacyCity.group_id }, dev);
+  const badMode = await call(
+    'createGroup',
+    { group_name: 'Bad City', member: 'Chris', daily_goal: 'Stretch', goal_reset_time: '00:00', game_mode: 'medium' },
+    dev,
+  );
+  check('createGroup rejects an unknown mode', badMode.error === 'INVALID_ARGUMENT', JSON.stringify(badMode));
+
+  await call('joinGroup', { group_code: easyCity.group_code, member: 'Bob' }, bob);
+  // Easy mode: one of two completes → half a day banked, streak counts it.
+  await call('selectBuild', { group_id: easyCity.group_id, type: 'apartment_c' }, dev);
+  await call('completeGoal', { group_id: easyCity.group_id }, dev);
+  await adminPatch(
+    `groups/${easyCity.group_id}`,
+    { last_processed_date: { stringValue: ymdDaysAgo(1) }, created_at: { timestampValue: new Date(Date.now() - 15 * 86400000).toISOString() } },
+    ['last_processed_date', 'created_at'],
+  );
+  const halfDay = await call('getGroup', { group_id: easyCity.group_id }, dev);
+  check('easy: one of two banks half a day', halfDay.result?.current_build?.days_completed === 0.5, JSON.stringify(halfDay.result?.current_build));
+  check('easy: streak counts the partial day', halfDay.result?.streak === 1, `streak=${halfDay.result?.streak}`);
+  check('easy: no build stall', halfDay.result?.abandoned_build === null, JSON.stringify(halfDay.result?.abandoned_build));
+
+  // Any member may switch; an unknown mode is refused; an outsider is refused.
+  const bobHard = await call('setGameMode', { group_id: easyCity.group_id, mode: 'hard' }, bob);
+  check('any member can switch mode', bobHard.result?.game_mode === 'hard', JSON.stringify(bobHard).slice(0, 200));
+  const badSwitch = await call('setGameMode', { group_id: easyCity.group_id, mode: 'medium' }, bob);
+  check('setGameMode rejects an unknown mode', badSwitch.error === 'INVALID_ARGUMENT', JSON.stringify(badSwitch));
+  const eveSwitch = await call('setGameMode', { group_id: easyCity.group_id, mode: 'easy' }, eve);
+  check('outsider cannot switch mode', eveSwitch.error === 'FAILED_PRECONDITION', JSON.stringify(eveSwitch));
+
+  // Hard mode now: dev alone completes → a near miss is recorded and the build stalls.
+  await call('completeGoal', { group_id: easyCity.group_id }, dev);
+  await adminPatch(
+    `groups/${easyCity.group_id}`,
+    { last_processed_date: { stringValue: ymdDaysAgo(1) } },
+    ['last_processed_date'],
+  );
+  const nearMiss = await call('getGroup', { group_id: easyCity.group_id }, dev);
+  check('hard: partial day stalls the build', nearMiss.result?.abandoned_build?.days_completed === 0.5, JSON.stringify(nearMiss.result?.abandoned_build));
+  const nearMissDoc = await readDoc(`groups/${easyCity.group_id}`, dev);
+  const ledger = (nearMissDoc.body?.fields?.near_miss_dates?.arrayValue?.values ?? []).map((v) => v.stringValue);
+  check('hard: near miss recorded', ledger.includes(todayUtc), JSON.stringify(ledger));
+  check('no suggestion below the threshold', nearMiss.result?.mode_suggestion === null, JSON.stringify(nearMiss.result?.mode_suggestion));
+
+  // Stage three near misses through the dev control → suggestion raised.
+  const staged = await call('demoSetNearMisses', { group_id: easyCity.group_id }, dev);
+  check('demoSetNearMisses raises the suggestion', staged.result?.mode_suggestion?.near_misses === 3, JSON.stringify(staged.result?.mode_suggestion));
+  const stagedByBob = await call('demoSetNearMisses', { group_id: easyCity.group_id }, bob);
+  check('demoSetNearMisses is allowlisted', stagedByBob.error === 'PERMISSION_DENIED', JSON.stringify(stagedByBob));
+  const dismissed = await call('dismissModeSuggestion', { group_id: easyCity.group_id }, bob);
+  check('dismiss records the member', (dismissed.result?.mode_suggestion?.dismissed_by ?? []).includes(bob.uid), JSON.stringify(dismissed.result?.mode_suggestion));
+  const dismissedDoc = await readDoc(`groups/${easyCity.group_id}`, dev);
+  const dismissedBy = (dismissedDoc.body?.fields?.mode_suggestion?.mapValue?.fields?.dismissed_by?.arrayValue?.values ?? []).map((v) => v.stringValue);
+  check('dismissal is persisted', dismissedBy.includes(bob.uid), JSON.stringify(dismissedBy));
+  const switched = await call('setGameMode', { group_id: easyCity.group_id, mode: 'easy' }, dev);
+  check('switching answers the suggestion', switched.result?.game_mode === 'easy' && switched.result?.mode_suggestion === null, JSON.stringify(switched.result?.mode_suggestion));
+  await call('deleteGroup', { group_id: easyCity.group_id }, dev);
+
   console.log('— profile upsert —');
   const upsert = await call('upsertProfile', { display_name: '  Chrisso  ' }, dev);
   check('upsertProfile trims + returns', upsert.result?.display_name === 'Chrisso', JSON.stringify(upsert));

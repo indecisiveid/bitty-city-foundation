@@ -33,6 +33,20 @@ import { NotificationCategory } from "./push";
 import { buildProgressOf, withArticle } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor } from "./buildCatalog";
 import { isProofKeyFor, applyProof, ProofEntry, MAX_PROOF_BYTES } from "./proofs";
+import {
+  GameMode,
+  LEGACY_GAME_MODE,
+  ModeSuggestion,
+  NEAR_MISS_WINDOW_DAYS,
+  dayShare,
+  isBuildFinished,
+  isGameMode,
+  normalizeGameMode,
+  recentNearMisses,
+  shouldSuggestEasyMode,
+  snapProgress,
+} from "./gameMode";
+import { easyModeSuggestionMessage } from "./crewMessages";
 import { proofsBucket, proofObjectSize, deleteProofObject } from "./proofStorage";
 
 const db = () => getFirestore();
@@ -217,6 +231,8 @@ export async function maybeProcessDay(
     memberPauses: data.member_pauses ?? null,
     cityPause: data.city_pause ?? null,
     pausedDates: data.paused_dates ?? [],
+    gameMode: normalizeGameMode(data.game_mode),
+    nearMissDates: data.near_miss_dates ?? [],
   });
 
   const writeUpdates: Record<string, unknown> = {
@@ -261,15 +277,61 @@ export async function maybeProcessDay(
   if (stalled) {
     const label = labelFor(stalled.type ?? "");
     const freezes = (writeUpdates.streak_freezes as number | undefined) ?? 0;
+    // What a miss IS depends on the mode: hard stalls when anyone is missing,
+    // easy only when nobody finished at all.
+    const why =
+      normalizeGameMode(merged.game_mode) === "easy"
+        ? "Nobody finished yesterday's goal."
+        : "Yesterday's goal wasn't finished by everyone.";
     await notifyAllMembers(groupId, merged, {
       title: `🚧 Your ${label} build stalled`,
       body:
         freezes > 0
-          ? `Yesterday's goal wasn't finished by everyone. Open the app today to spend a streak freeze and pick it back up — after today it's gone.`
-          : `Yesterday's goal wasn't finished by everyone, and there are no streak freezes left. You'll need to start a new build.`,
+          ? `${why} Open the app today to spend a streak freeze and pick it back up — after today it's gone.`
+          : `${why} There are no streak freezes left, so you'll need to start a new build.`,
     });
   }
 
+  return maybeSuggestEasyMode(groupId, merged, processingDate);
+}
+
+/**
+ * Hard mode's been rough → suggest easy mode, once per cooldown.
+ *
+ * Runs after every settlement pass (and from the dev control that stages a
+ * ledger). Pure decision in gameMode.ts; this is the write and the push. The
+ * app opens the suggestion sheet off `mode_suggestion` on the next snapshot.
+ */
+export async function maybeSuggestEasyMode(
+  groupId: string,
+  data: FirebaseFirestore.DocumentData,
+  processingDate: string,
+): Promise<FirebaseFirestore.DocumentData> {
+  const nearMissDates: string[] = data.near_miss_dates ?? [];
+  const existing: ModeSuggestion | null = data.mode_suggestion ?? null;
+  const mode: GameMode = normalizeGameMode(data.game_mode);
+  if (!shouldSuggestEasyMode({ mode, nearMissDates, processingDate, suggestion: existing })) {
+    return data;
+  }
+  const suggestion: ModeSuggestion = {
+    suggested_on: processingDate,
+    near_misses: recentNearMisses(nearMissDates, processingDate),
+    dismissed_by: [],
+  };
+  await db().collection("groups").doc(groupId).update({ mode_suggestion: suggestion });
+  const merged: FirebaseFirestore.DocumentData = { ...data, mode_suggestion: suggestion };
+  await notifyAllMembers(
+    groupId,
+    merged,
+    {
+      ...easyModeSuggestionMessage(
+        merged.group_name ?? "your city",
+        suggestion.near_misses,
+        NEAR_MISS_WINDOW_DAYS,
+      ),
+      data: { type: "mode_suggestion" },
+    },
+  );
   return merged;
 }
 
@@ -286,6 +348,13 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
     typeof request.data.goal_reset_timezone === "string" && request.data.goal_reset_timezone
       ? request.data.goal_reset_timezone
       : "UTC";
+  // Absent → hard. An old binary never sends one, and hard is the only game
+  // it knows how to show; the current app always sends its choice.
+  const rawMode = request.data.game_mode;
+  if (rawMode !== undefined && rawMode !== null && !isGameMode(rawMode)) {
+    throw new HttpsError("invalid-argument", "game_mode must be 'easy' or 'hard'");
+  }
+  const gameMode: GameMode = isGameMode(rawMode) ? rawMode : LEGACY_GAME_MODE;
 
   const groupId = uuidv4();
   const userRef = db().collection("users").doc(uid);
@@ -324,6 +393,10 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           daily_goal: dailyGoal,
           goal_reset_time: goalResetTime,
           goal_reset_timezone: goalResetTimezone,
+          game_mode: gameMode,
+          game_mode_set_by: uid,
+          near_miss_dates: [],
+          mode_suggestion: null,
           completions_today: [],
           streak: 0,
           streak_freezes: STARTING_FREEZES,
@@ -622,15 +695,22 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     // processor uses (someone on vacation is not waited for). `landed_on`
     // keeps `selectBuild` from starting a second build off today's
     // completions; day processing then finds no build and only logs the day.
+    //
+    // Game mode (gameMode.ts): the question is whether today's SHARE closes
+    // the build — a whole day in hard mode once everyone's in, whatever
+    // fraction reaches the requirement in easy mode. Same arithmetic the
+    // settlement fallback uses, so the two can never disagree.
     const crewRoster = rosterOf(freshData);
     const active = activeMembersOn(crewRoster, activityDate);
-    const crewDone =
-      !isDayPaused(crewRoster, activityDate) &&
-      active.length > 0 &&
-      active.every((m: string) => newCompletions.includes(m));
+    const completedActive = active.filter((m: string) => newCompletions.includes(m)).length;
+    const shareNow = isDayPaused(crewRoster, activityDate)
+      ? 0
+      : dayShare(normalizeGameMode(freshData.game_mode), completedActive, active.length);
     const build = freshData.current_build ?? null;
     const landing =
-      crewDone && build && build.days_completed + 1 >= build.days_required
+      shareNow > 0 &&
+      build &&
+      isBuildFinished(snapProgress(build.days_completed + shareNow), build.days_required)
         ? landBuild({
             currentBuild: build,
             cityMap: freshData.city_map,

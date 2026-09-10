@@ -129,3 +129,49 @@ export function cityResumedMessage(
     body: `${byName} resumed the city. That's ${completions(memberCount)} again, starting today.`,
   };
 }
+
+// --- Game mode -----------------------------------------------------------------
+//
+// A mode switch changes what a day IS, which is a bigger move of the bar than
+// any join or pause. The body states the new rule as the thing to do today.
+
+/** A member switched the city's game mode. */
+export function modeChangedMessage(
+  byName: string,
+  cityName: string,
+  mode: "easy" | "hard",
+  activeCount: number,
+): CrewMessage {
+  if (mode === "easy") {
+    return {
+      title: `${byName} switched ${cityName} to easy mode`,
+      body:
+        `From the next reset, every completion counts: each person who finishes ` +
+        `adds their share of the day, and at least 1 of ${activeCount} keeps the city growing.`,
+    };
+  }
+  return {
+    title: `${byName} switched ${cityName} to hard mode`,
+    body:
+      `From the next reset it's all or nothing: the build only moves on days ` +
+      `when all ${activeCount} of you complete the goal.`,
+  };
+}
+
+/**
+ * Hard mode has been rough — suggest easy mode. Sent once per cooldown
+ * (gameMode.ts) when the crew keeps finishing partially.
+ */
+export function easyModeSuggestionMessage(
+  cityName: string,
+  nearMisses: number,
+  windowDays: number,
+): CrewMessage {
+  return {
+    title: `Hard mode's been rough in ${cityName}`,
+    body:
+      `${nearMisses} of the last ${windowDays} days someone finished but not everyone, ` +
+      `so nothing counted. In easy mode, at least 1 person needs to complete your goal ` +
+      `to make progress. Tap to switch.`,
+  };
+}
