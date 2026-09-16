@@ -25,6 +25,7 @@ export {
   demoResetCity,
   demoShowcaseCity,
   demoSetNearMisses,
+  demoBreakStreak,
 } from "./demoHandlers";
 
 export { registerPushToken, unregisterPushToken, sendTestPush } from "./notificationHandlers";

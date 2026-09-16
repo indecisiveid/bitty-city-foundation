@@ -536,6 +536,63 @@ async function main() {
   const repairAgain = await call('repairStreak', { group_id: g.group_id }, dev);
   check('second repair rejected', repairAgain.error === 'FAILED_PRECONDITION');
 
+  console.log('— paid streak repair (1.2): costs a freeze, resumes the lost build —');
+  // A break that cost a 3-day build, with no freezes left: exactly the state
+  // day processing leaves behind (the lost build rides on broken_streak).
+  const lostSeed = {
+    building_completions: {
+      arrayValue: { values: [{ stringValue: ymdDaysAgo(6) }, { stringValue: ymdDaysAgo(5) }, { stringValue: ymdDaysAgo(4) }] },
+    },
+    frozen_dates: { arrayValue: {} },
+    streak: { integerValue: '0' },
+    streak_freezes: { integerValue: '0' },
+    current_build: { nullValue: null },
+    abandoned_build: { nullValue: null },
+    landed_on: { nullValue: null },
+    broken_streak: {
+      mapValue: {
+        fields: {
+          value: { integerValue: '3' },
+          broken_on: { stringValue: ymdDaysAgo(2) },
+          last_active_date: { stringValue: ymdDaysAgo(4) },
+          lost_build: {
+            mapValue: {
+              fields: {
+                type: { stringValue: 'apartment_c' },
+                days_required: { integerValue: '3' },
+                days_completed: { integerValue: '2' },
+              },
+            },
+          },
+        },
+      },
+    },
+    last_processed_date: { stringValue: ymdDaysAgo(0) },
+    last_activity_date: { stringValue: ymdDaysAgo(4) },
+  };
+  await adminPatch(`groups/${g.group_id}`, lostSeed, Object.keys(lostSeed));
+  const paidBroke = await call('repairStreak', { group_id: g.group_id, spend_freeze: true }, dev);
+  check('paid repair refused with no freeze', paidBroke.error === 'FAILED_PRECONDITION', JSON.stringify(paidBroke));
+
+  await adminPatch(`groups/${g.group_id}`, {
+    streak_freezes: { integerValue: '1' },
+    current_build: { mapValue: { fields: { type: { stringValue: 'house_a' }, days_required: { integerValue: '1' }, days_completed: { integerValue: '0' } } } },
+  }, ['streak_freezes', 'current_build']);
+  const paidBusy = await call('repairStreak', { group_id: g.group_id, spend_freeze: true }, dev);
+  check('paid repair refused while a build holds the slot', paidBusy.error === 'FAILED_PRECONDITION', JSON.stringify(paidBusy));
+
+  await adminPatch(`groups/${g.group_id}`, { current_build: { nullValue: null } }, ['current_build']);
+  const paid = await call('repairStreak', { group_id: g.group_id, spend_freeze: true }, dev);
+  check('paid repair spends one freeze', paid.result?.streak_freezes === 0, `freezes=${paid.result?.streak_freezes}`);
+  check('paid repair restores the streak', paid.result?.streak === 3, `streak=${paid.result?.streak}`);
+  check('paid repair resumes the lost build at its progress',
+    paid.result?.current_build?.type === 'apartment_c' && paid.result?.current_build?.days_completed === 2,
+    JSON.stringify(paid.result?.current_build));
+  check('paid repair clears the break', paid.result?.broken_streak === null);
+  const paidAgain = await call('repairStreak', { group_id: g.group_id, spend_freeze: true }, dev);
+  check('second paid repair rejected', paidAgain.error === 'FAILED_PRECONDITION');
+  await adminPatch(`groups/${g.group_id}`, { current_build: { nullValue: null } }, ['current_build']);
+
   console.log('— missed build day → rescue —');
   // Seed: a 3-day apartment 1 day in, yesterday unprocessed and nobody
   // completed, 1 freeze in stock, city already has buildings to lose.

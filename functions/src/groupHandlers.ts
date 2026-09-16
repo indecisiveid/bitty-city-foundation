@@ -9,6 +9,8 @@ import {
   getProcessingDate,
   processEndOfDay,
   applyStreakRepair,
+  streakRepairBlocker,
+  StreakRepairBlocker,
   applyBuildRescue,
   isFirstDayGrace,
   findEmptyTiles,
@@ -1178,6 +1180,7 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
       // The rescue freezes the missed day as well, so the next pass doesn't
       // charge it a second time — see applyBuildRescue.
       frozenDates: freshData.frozen_dates ?? [],
+      brokenStreak: freshData.broken_streak ?? null,
       todayStr: today,
     });
 
@@ -1215,53 +1218,92 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
 export const repairStreak = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
   const { group_id } = request.data;
+  // 1.2+ clients show the cost and send this. A 1.1 client doesn't, and its
+  // button says nothing about freezes, so it keeps the old free repair rather
+  // than being charged silently. Remove once 1.1 is gone.
+  const paid = request.data.spend_freeze === true;
 
   if (!group_id) {
     throw new HttpsError("invalid-argument", "group_id is required");
   }
 
-  const groupRef = db().collection("groups").doc(group_id);
-  const snap = await groupRef.get();
-  if (!snap.exists) {
-    throw new HttpsError("not-found", "Group not found");
-  }
+  const groupRef = await loadSettled(group_id, uid);
 
-  let data = snap.data()!;
-  memberNameForUid(data, uid);
+  let finalData: FirebaseFirestore.DocumentData;
+  let repairerName: string | null = null;
+  let restoredValue = 0;
+  let resumedType: string | null = null;
 
-  // Settle any pending day first so broken_streak is current
-  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
-    data = await maybeProcessDay(group_id, data);
-  }
+  // Transactional: a paid repair spends a freeze, and two members tapping at
+  // once must not spend two.
+  await db().runTransaction(async (tx) => {
+    const freshSnap = await tx.get(groupRef);
+    const fresh = freshSnap.data()!;
+    const member = memberNameForUid(fresh, uid);
+    const today = getProcessingDate(fresh.goal_reset_time, fresh.goal_reset_timezone ?? "UTC");
+    const brokenStreak = fresh.broken_streak ?? null;
+    const payment = paid
+      ? {
+          streakFreezes: fresh.streak_freezes ?? 0,
+          currentBuild: fresh.current_build ?? null,
+          landedOn: fresh.landed_on ?? null,
+        }
+      : undefined;
 
-  const today = getProcessingDate(
-    data.goal_reset_time,
-    data.goal_reset_timezone ?? "UTC",
-  );
-  const repaired = applyStreakRepair({
-    buildingCompletions: data.building_completions ?? [],
-    frozenDates: data.frozen_dates ?? [],
-    pausedDates: data.paused_dates ?? [],
-    brokenStreak: data.broken_streak ?? null,
-    todayStr: today,
+    if (payment) {
+      const blocker = streakRepairBlocker({ brokenStreak, todayStr: today, ...payment });
+      if (blocker) {
+        throw new HttpsError("failed-precondition", REPAIR_BLOCKER_MESSAGES[blocker], { reason: blocker });
+      }
+    }
+
+    const repaired = applyStreakRepair({
+      buildingCompletions: fresh.building_completions ?? [],
+      frozenDates: fresh.frozen_dates ?? [],
+      pausedDates: fresh.paused_dates ?? [],
+      brokenStreak,
+      todayStr: today,
+      payment,
+    });
+    if (!repaired) {
+      throw new HttpsError(
+        "failed-precondition",
+        REPAIR_BLOCKER_MESSAGES.nothing_to_repair,
+        { reason: "nothing_to_repair" },
+      );
+    }
+
+    tx.update(groupRef, repaired);
+    finalData = { ...fresh, ...repaired };
+    repairerName = member;
+    restoredValue = brokenStreak?.value ?? 0;
+    resumedType = repaired.current_build?.type ?? null;
   });
 
-  if (!repaired) {
-    throw new HttpsError(
-      "failed-precondition",
-      "There's no recently broken streak to repair",
+  if (repairerName && paid) {
+    const label = resumedType ? labelFor(resumedType) : null;
+    await notifyAllMembers(
+      group_id,
+      finalData!,
+      {
+        title: `🧊 ${restoredValue}-day streak repaired`,
+        body: label
+          ? `${repairerName} spent a streak freeze to bring back your streak and your ${label} build. Finish today's goal to keep it moving.`
+          : `${repairerName} spent a streak freeze to bring back your streak.`,
+      },
+      repairerName,
     );
   }
 
-  await groupRef.update({
-    frozen_dates: repaired.frozen_dates,
-    streak: repaired.streak,
-    broken_streak: null,
-  });
-
-  const updatedSnap = await groupRef.get();
-  return groupToResponse(group_id, updatedSnap.data()!);
+  return groupToResponse(group_id, finalData!);
 });
+
+const REPAIR_BLOCKER_MESSAGES: Record<StreakRepairBlocker, string> = {
+  nothing_to_repair: "There's no recently broken streak to repair",
+  no_freeze: "Repairing a streak costs a streak freeze — land a building to earn one",
+  build_in_progress: "Finish the current build first — the repair brings your lost build back",
+  landed_today: "Your city grew today — repair it tomorrow",
+};
 
 // --- leaveGroup ---
 

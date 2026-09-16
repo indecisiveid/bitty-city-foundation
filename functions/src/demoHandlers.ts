@@ -413,3 +413,56 @@ export const demoSetNearMisses = onCall({ enforceAppCheck: true }, async (reques
   const after = await maybeSuggestEasyMode(group_id, { ...data, ...staged }, processingDate);
   return groupToResponse(group_id, after);
 });
+
+// --- demoBreakStreak ---
+//
+// Stages the state a paid streak repair exists for: a live streak broke two
+// game days ago on a miss that also cost a 3-day build, so the break carries
+// that build as `lost_build`. The repair is otherwise unreachable in dev — a
+// break needs real missed days, and the lost build needs a stall on the day
+// before the break. `with_freeze` decides whether the crew can pay yet.
+
+export const demoBreakStreak = onCall({ enforceAppCheck: true }, async (request) => {
+  requireDemoAccess(request);
+  const { group_id } = request.data;
+  const withFreeze = request.data.with_freeze === true;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+
+  const data = snap.data()!;
+  const today = getProcessingDate(data.goal_reset_time, data.goal_reset_timezone ?? "UTC");
+  const lastActive = daysBefore(today, 2);
+  const value = 12;
+  // Twelve completed days ending two days ago — the chain the repair restores.
+  const completions = Array.from({ length: value }, (_, i) => daysBefore(lastActive, value - 1 - i));
+
+  await groupRef.update({
+    building_completions: completions,
+    frozen_dates: [],
+    streak: 0,
+    streak_freezes: withFreeze ? 1 : 0,
+    current_build: null,
+    abandoned_build: null,
+    landed_on: null,
+    completions_today: [],
+    last_activity_date: lastActive,
+    last_processed_date: today,
+    broken_streak: {
+      value,
+      broken_on: daysBefore(today, 1),
+      last_active_date: lastActive,
+      lost_build: { type: "apartment_c", days_required: 3, days_completed: 2 },
+    },
+  });
+
+  const updatedSnap = await groupRef.get();
+  return groupToResponse(group_id, updatedSnap.data()!);
+});

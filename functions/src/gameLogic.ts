@@ -152,6 +152,29 @@ export interface BrokenStreak {
   value: number;
   broken_on: string; // "YYYY-MM-DD" processing day the break was recorded
   last_active_date: string; // "YYYY-MM-DD" last day the chain was alive
+  /**
+   * The build that stalled on the miss that broke the chain, kept for the
+   * whole repair window so a paid repair can resume it at its progress.
+   *
+   * It has to live HERE, not in `abandoned_build`: the rescue offer lasts one
+   * day and is cleared by picking a new build, but a crew that broke its
+   * streak holds no freezes by definition and must land a new build to earn
+   * one before it can pay. Absent when no build was in flight.
+   */
+  lost_build?: LostBuild;
+}
+
+/** A stalled build as the repair window remembers it. */
+export type LostBuild = Omit<AbandonedBuild, "abandoned_on">;
+
+function lostBuildFrom(b: AbandonedBuild): LostBuild {
+  return {
+    type: b.type,
+    days_required: b.days_required,
+    days_completed: b.days_completed,
+    ...(b.target_tile ? { target_tile: b.target_tile } : {}),
+    ...(b.target_park ? { target_park: b.target_park } : {}),
+  };
 }
 
 export interface GroupDoc {
@@ -1137,10 +1160,17 @@ export function processEndOfDay(params: {
             // only record breaks still inside the repair window.
             const brokenOnDay = missed[0] + 1;
             if (pDay - brokenOnDay <= REPAIR_WINDOW_DAYS) {
+              // The build this miss cost: stalled in this very pass (a
+              // batched absence), or the rescue offer expiring in it (the
+              // usual case — the break is charged one pass after the stall).
+              const lostSource =
+                updates.abandoned_build ??
+                (updates.abandoned_build === null ? abandonedBuild : null);
               broken = {
                 value: preStreak,
                 broken_on: formatYmd(brokenOnDay),
                 last_active_date: formatYmd(lastActive),
+                ...(lostSource ? { lost_build: lostBuildFrom(lostSource) } : {}),
               };
             }
           }
@@ -1211,6 +1241,10 @@ export function applyBuildRescue(params: {
   abandonedBuild: AbandonedBuild | null;
   currentBuild: CurrentBuild | null;
   streakFreezes: number;
+  /** A break recorded with this same build as its lost build (a batched
+   *  absence) must forget it once rescued, or a later repair would grant the
+   *  build a second time. */
+  brokenStreak?: BrokenStreak | null;
   /** Absent only in older callers; the missed day is still frozen from an
    *  empty list. */
   frozenDates?: string[];
@@ -1220,8 +1254,9 @@ export function applyBuildRescue(params: {
   abandoned_build: null;
   streak_freezes: number;
   frozen_dates: string[];
+  broken_streak?: BrokenStreak;
 } | null {
-  const { abandonedBuild, currentBuild, streakFreezes, frozenDates = [], todayStr } = params;
+  const { abandonedBuild, currentBuild, streakFreezes, frozenDates = [], todayStr, brokenStreak } = params;
   if (!isRescuableBuild(abandonedBuild, currentBuild, todayStr)) return null;
   if (streakFreezes < 1) return null;
 
@@ -1239,7 +1274,13 @@ export function applyBuildRescue(params: {
     abandoned_build: null,
     streak_freezes: streakFreezes - 1,
     frozen_dates: frozen,
+    ...(brokenStreak?.lost_build ? { broken_streak: withoutLostBuild(brokenStreak) } : {}),
   };
+}
+
+function withoutLostBuild(b: BrokenStreak): BrokenStreak {
+  const { lost_build: _dropped, ...rest } = b;
+  return rest;
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1300,45 @@ export function applyBuildRescue(params: {
 // actually completed is skipped, as are paused days.
 // ---------------------------------------------------------------------------
 
+export type StreakRepairBlocker =
+  | "nothing_to_repair"
+  | "no_freeze"
+  | "build_in_progress"
+  | "landed_today";
+
+/** The cost side of a paid repair. Omitted only by pre-1.2 clients. */
+export interface StreakRepairPayment {
+  streakFreezes: number;
+  currentBuild: CurrentBuild | null;
+  /** `landed_on`: the game day a build last landed, if any. */
+  landedOn: string | null;
+}
+
+/**
+ * Why a paid repair can't happen right now, or null if it can.
+ *
+ * A repair costs one freeze. When the break also cost a build, the repair
+ * puts that build back in the slot, so it obeys `selectBuild`'s rules: the
+ * slot must be empty, and not on a day a build already landed (one day's
+ * check-ins must never count toward two builds).
+ */
+export function streakRepairBlocker(params: {
+  brokenStreak: BrokenStreak | null;
+  todayStr: string;
+} & StreakRepairPayment): StreakRepairBlocker | null {
+  const { brokenStreak, todayStr, streakFreezes, currentBuild, landedOn } = params;
+  if (!brokenStreak) return "nothing_to_repair";
+  if (daysBetween(brokenStreak.broken_on, todayStr) > REPAIR_WINDOW_DAYS) {
+    return "nothing_to_repair";
+  }
+  if (streakFreezes < 1) return "no_freeze";
+  if (brokenStreak.lost_build) {
+    if (currentBuild) return "build_in_progress";
+    if (landedOn === todayStr) return "landed_today";
+  }
+  return null;
+}
+
 export function applyStreakRepair(params: {
   buildingCompletions: string[];
   frozenDates: string[];
@@ -1267,14 +1347,26 @@ export function applyStreakRepair(params: {
   pausedDates?: string[];
   brokenStreak: BrokenStreak | null;
   todayStr: string;
+  /**
+   * Present → a paid repair (1.2+): spends one freeze and resumes the lost
+   * build. Absent → the free pre-1.2 repair, kept so a 1.1 client (whose
+   * button shows no cost) is never charged silently. Streak only.
+   */
+  payment?: StreakRepairPayment;
 }): {
   frozen_dates: string[];
   streak: number;
   broken_streak: null;
+  streak_freezes?: number;
+  current_build?: CurrentBuild;
+  abandoned_build?: null;
 } | null {
-  const { buildingCompletions, frozenDates, pausedDates = [], brokenStreak, todayStr } = params;
+  const { buildingCompletions, frozenDates, pausedDates = [], brokenStreak, todayStr, payment } = params;
   if (!brokenStreak) return null;
   if (daysBetween(brokenStreak.broken_on, todayStr) > REPAIR_WINDOW_DAYS) {
+    return null;
+  }
+  if (payment && streakRepairBlocker({ brokenStreak, todayStr, ...payment })) {
     return null;
   }
 
@@ -1292,13 +1384,22 @@ export function applyStreakRepair(params: {
     }
   }
 
-  return {
+  const repaired = {
     frozen_dates: frozen,
     streak: computeStreakWithFreezes(
       buildingCompletions,
       bridgeDates(frozen, pausedDates),
       todayStr,
     ),
-    broken_streak: null,
+    broken_streak: null as null,
+  };
+  if (!payment) return repaired;
+
+  const lost = brokenStreak.lost_build;
+  return {
+    ...repaired,
+    streak_freezes: payment.streakFreezes - 1,
+    // Progress exactly as it stalled — the crew picks up the day it missed.
+    ...(lost ? { current_build: { ...lost }, abandoned_build: null } : {}),
   };
 }
