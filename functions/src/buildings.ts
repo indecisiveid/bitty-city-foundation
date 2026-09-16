@@ -35,6 +35,8 @@ export function buildProgressOf(currentBuild: unknown): BuildProgress | null {
     type?: string;
     days_required?: number;
     days_completed?: number;
+    target_tile?: unknown;
+    target_park?: unknown;
   };
   const type = build.type ?? "";
   const daysRequired = build.days_required ?? daysFor(type) ?? 0;
@@ -47,7 +49,12 @@ export function buildProgressOf(currentBuild: unknown): BuildProgress | null {
   const dayNumber = Math.min(daysCompleted + 1, daysRequired);
 
   return {
-    label: labelFor(type),
+    // A restoration narrates as one ("Day 1 of 3 banked toward your Park
+    // restoration") rather than as a second park going up.
+    label:
+      build.target_tile != null || build.target_park != null
+        ? `${labelFor(type)} restoration`
+        : labelFor(type),
     dayNumber,
     daysRequired,
   };

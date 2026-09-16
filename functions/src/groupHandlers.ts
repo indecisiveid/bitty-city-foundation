@@ -15,6 +15,9 @@ import {
   landBuild,
   STARTING_FREEZES,
   rowMajorBuildOrder,
+  RESTORE_BUILDING_DAYS,
+  parkRestoreDays,
+  damagedCellCount,
 } from "./gameLogic";
 import {
   generateGroupCode,
@@ -303,13 +306,24 @@ export async function maybeProcessDay(
   // "City grew" push: a build landed during this end-of-day pass. Whichever
   // caller triggered processing sends it; last_processed_date has advanced so
   // it won't re-fire. Best-effort — notify never throws.
-  const event = writeUpdates.pending_event as { type?: string; building?: string } | undefined;
+  const event = writeUpdates.pending_event as
+    | { type?: string; building?: string; restored?: boolean }
+    | undefined;
   if (event?.type === "build_complete") {
     const label = labelFor(event.building ?? "");
-    await notifyAllMembers(groupId, merged, {
-      title: `🏙️ ${merged.group_name ?? "Your city"} grew!`,
-      body: `Your crew finished ${withArticle(label)}. Come see it in the city.`,
-    });
+    await notifyAllMembers(
+      groupId,
+      merged,
+      event.restored
+        ? {
+            title: `🧱 ${merged.group_name ?? "Your city"} is whole again`,
+            body: `Your crew restored ${withArticle(label)}. Come see it in the city.`,
+          }
+        : {
+            title: `🏙️ ${merged.group_name ?? "Your city"} grew!`,
+            body: `Your crew finished ${withArticle(label)}. Come see it in the city.`,
+          },
+    );
   }
 
   // "Build stalled" push: a multi-day build lost a day. Nothing was
@@ -930,17 +944,58 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
   return groupToResponse(group_id, finalData!);
 });
 
-// --- repairTile ---
+// --- repairTile / repairPark ---
 //
-// Rebuild what a meteor levelled, on the lot where it stood.
+// Restore what a meteor broke. Per the park design (vault
+// specs/2026-08-02-park-design.md, "Damage and repair"), restoring is
+// CHEAPER than building — the lot, roads and footprint survive, only the
+// structure is gone:
+//   - a levelled building comes back in RESTORE_BUILDING_DAYS (1), whatever
+//     it originally cost, on the lot where it stood;
+//   - a damaged park is fixed in place in parkRestoreDays(damaged) (1–4).
 //
-// The rules are the ordinary build rules, deliberately: a repair costs the
-// same days the original type costs, occupies the single build slot, and
-// lands when the crew completes those days. Rebuilding is not a discount for
-// having been hit — it is the same work, aimed at a specific ruin.
-//
-// Transactional for the same reason `selectBuild` is: two members tapping two
-// different ruins at once must not both open a build.
+// Both occupy the single build slot and ride the ordinary multi-day machine
+// (progress, stalls, rescue, pushes), so they share the slot rules with
+// `selectBuild`: nothing in progress, and not on a day a build already
+// landed. Transactional for the same reason `selectBuild` is: two members
+// tapping two different ruins at once must not both open a build.
+
+/** The slot rules every build-starting callable enforces. Throws. */
+function assertBuildSlotFree(freshData: FirebaseFirestore.DocumentData): void {
+  if (freshData.current_build != null) {
+    throw new HttpsError("failed-precondition", "A build is already in progress");
+  }
+  const today = getProcessingDate(freshData.goal_reset_time, freshData.goal_reset_timezone ?? "UTC");
+  if (freshData.landed_on === today) {
+    throw new HttpsError("failed-precondition", "Your city grew today — start the next build tomorrow");
+  }
+}
+
+function restoreSpan(days: number): string {
+  return days === 1
+    ? "Today's goal restores it."
+    : `It takes ${days} days of everyone completing their goal.`;
+}
+
+/** Load the group, check membership, and settle any outstanding days. */
+async function loadSettled(
+  groupId: string,
+  uid: string,
+): Promise<FirebaseFirestore.DocumentReference> {
+  const groupRef = db().collection("groups").doc(groupId);
+  const snap = await groupRef.get();
+  if (!snap.exists) {
+    throw new HttpsError("not-found", "Group not found");
+  }
+  const data = snap.data()!;
+  memberNameForUid(data, uid);
+  // Settle first: a ruin might be about to be rebuilt by a build that is
+  // already landing, and the restoration must see that.
+  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
+    await maybeProcessDay(groupId, data);
+  }
+  return groupRef;
+}
 
 export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
@@ -953,20 +1008,7 @@ export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
     );
   }
 
-  const groupRef = db().collection("groups").doc(group_id);
-  const snap = await groupRef.get();
-  if (!snap.exists) {
-    throw new HttpsError("not-found", "Group not found");
-  }
-
-  let data = snap.data()!;
-  memberNameForUid(data, uid);
-
-  // Settle any outstanding days first: a ruin might be about to be rebuilt by
-  // a build that is already landing, and the repair must see that.
-  if (needsDayProcessing(data.goal_reset_time, data.last_processed_date, data.goal_reset_timezone ?? "UTC")) {
-    data = await maybeProcessDay(group_id, data);
-  }
+  const groupRef = await loadSettled(group_id, uid);
 
   let finalData: FirebaseFirestore.DocumentData;
   let repairerName: string | null = null;
@@ -976,10 +1018,7 @@ export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
     const freshSnap = await tx.get(groupRef);
     const freshData = freshSnap.data()!;
     const member = memberNameForUid(freshData, uid);
-
-    if (freshData.current_build != null) {
-      throw new HttpsError("failed-precondition", "A build is already in progress");
-    }
+    assertBuildSlotFree(freshData);
 
     const cell = freshData.city_map?.[String(row)]?.[col];
     if (cell !== "rubble") {
@@ -994,19 +1033,19 @@ export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
     if (!type || !daysFor(type)) {
       throw new HttpsError(
         "failed-precondition",
-        "No record of what stood here, so it can't be rebuilt",
+        "No record of what stood here, so it can't be restored",
       );
     }
 
     const newBuild = {
       type,
-      days_required: daysFor(type)!,
+      days_required: RESTORE_BUILDING_DAYS,
       days_completed: 0,
       target_tile: { row, col },
     };
 
-    // A repair gives up any stalled build still on offer, exactly as picking
-    // a new build does — there is only ever one build slot.
+    // A restoration gives up any stalled build still on offer, exactly as
+    // picking a new build does — there is only ever one build slot.
     tx.update(groupRef, { current_build: newBuild, abandoned_build: null });
     finalData = { ...freshData, current_build: newBuild, abandoned_build: null };
     repairerName = member;
@@ -1015,16 +1054,72 @@ export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
 
   if (repairerName) {
     const label = labelFor(repairedType);
-    const days: number = daysFor(repairedType)!;
-    const span = days === 1
-      ? "Today's goal rebuilds it."
-      : `It takes ${days} days of everyone completing their goal.`;
     await notifyAllMembers(
       group_id,
       finalData!,
       {
-        title: `🧱 Rebuilding ${withArticle(label)}`,
-        body: `${repairerName} is putting ${withArticle(label)} back up in ${finalData!.group_name ?? "your city"}. ${span}`,
+        title: `🧱 Restoring ${withArticle(label)}`,
+        body: `${repairerName} is putting ${withArticle(label)} back up in ${finalData!.group_name ?? "your city"}. ${restoreSpan(RESTORE_BUILDING_DAYS)}`,
+      },
+      repairerName,
+    );
+  }
+
+  return groupToResponse(group_id, finalData!);
+});
+
+export const repairPark = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const { group_id, park_id } = request.data;
+
+  if (!group_id || typeof park_id !== "string" || !park_id) {
+    throw new HttpsError("invalid-argument", "group_id and park_id are required");
+  }
+
+  const groupRef = await loadSettled(group_id, uid);
+
+  let finalData: FirebaseFirestore.DocumentData;
+  let repairerName: string | null = null;
+  let parkType = "";
+  let days = 0;
+
+  await db().runTransaction(async (tx) => {
+    const freshSnap = await tx.get(groupRef);
+    const freshData = freshSnap.data()!;
+    const member = memberNameForUid(freshData, uid);
+    assertBuildSlotFree(freshData);
+
+    const park = normalizeParks(freshData.parks).find((pk) => pk.park_id === park_id);
+    if (!park) {
+      throw new HttpsError("not-found", "That park isn't in this city");
+    }
+    const damaged = damagedCellCount(park.damage);
+    if (damaged === 0) {
+      throw new HttpsError("failed-precondition", "That park isn't damaged");
+    }
+
+    parkType = park.cells === 15 ? "park_large" : "park_small";
+    days = parkRestoreDays(damaged);
+    const newBuild = {
+      type: parkType,
+      days_required: days,
+      days_completed: 0,
+      target_park: park_id,
+    };
+
+    tx.update(groupRef, { current_build: newBuild, abandoned_build: null });
+    finalData = { ...freshData, current_build: newBuild, abandoned_build: null };
+    repairerName = member;
+  });
+
+  if (repairerName) {
+    const label = labelFor(parkType);
+    await notifyAllMembers(
+      group_id,
+      finalData!,
+      {
+        title: `🌳 Restoring ${withArticle(label)}`,
+        body: `${repairerName} is fixing up ${withArticle(label)} in ${finalData!.group_name ?? "your city"}. ${restoreSpan(days)}`,
       },
       repairerName,
     );

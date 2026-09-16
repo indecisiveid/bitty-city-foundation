@@ -13,6 +13,7 @@ export {
   repairStreak,
   rescueBuild,
   repairTile,
+  repairPark,
   upsertProfile,
   deleteAccount,
 } from "./groupHandlers";

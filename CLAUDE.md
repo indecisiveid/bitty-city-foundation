@@ -23,7 +23,8 @@ functions/src/
   modeHandlers.ts    Callables: setGameMode (any member), dismissModeSuggestion
   groupHandlers.ts   Callables: createGroup, joinGroup, getGroup,
                      completeGoal, selectBuild, deleteGroup, leaveGroup,
-                     repairStreak, upsertProfile
+                     repairStreak, rescueBuild, repairTile, repairPark,
+                     upsertProfile
   demoHandlers.ts    Dev-only callables (demoAsteroid/FillCity/SetBuildings/
                      ResetCity) — deployed but email-allowlisted
   auth.ts            requireAuth / requireDemoAccess (+ DEMO_ALLOWLIST param)
@@ -101,6 +102,13 @@ group_ids[]}` (cross-device restore + 100-groups cap).
   forgiveness (`applyBuildRescue`, `applyStreakRepair`) must therefore
   freeze the just-settled label too, or the next pass bills the same miss
   twice.
+- **Restoring meteor damage** (park design spec): `repairTile` restores a
+  levelled building on its own lot in `RESTORE_BUILDING_DAYS` (1) whatever it
+  cost; `repairPark` clears a damaged park in place in `parkRestoreDays`
+  (1–4 by damaged cells). Both take the build slot and refuse after a landing
+  today. `target_tile` / `target_park` must survive a stall + rescue, or a
+  rescued park restoration lands as a brand-new park. Mirrored in the app's
+  `src/utils/restore.ts`.
 - **Freezes** protect the streak counter only. The **7-day inactivity
   meteor** (no completions for ≥7 days → destroy ceil(20%), max 10,
   throttled to one per 7 days) fires regardless of freezes and regardless
@@ -126,7 +134,7 @@ cd functions && npm test          # jest (gameLogic suite)
 # pubsub is required now too — the scheduled day-rollover function is a
 # Pub/Sub trigger and is silently ignored by the emulator without it.
 firebase emulators:start --only auth,functions,firestore,storage,pubsub --project bitty-city --non-interactive
-node scripts/emulator-smoke.mjs   # 121-check end-to-end smoke (pubsub: the scheduler section)
+node scripts/emulator-smoke.mjs   # 161-check end-to-end smoke (pubsub: the scheduler section)
 # Ports busy (another session's emulator)? Start yours from a copy of
 # firebase.json with other ports and run the smoke with
 # SMOKE_{AUTH,FUNCTIONS,FIRESTORE,STORAGE}_PORT=… set.

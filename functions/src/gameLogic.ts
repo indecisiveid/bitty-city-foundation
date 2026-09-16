@@ -53,6 +53,27 @@ export const REPAIR_WINDOW_DAYS = 7;
 // no freezes) and the build is gone for good — they choose a new one.
 export const BUILD_RESCUE_WINDOW_DAYS = 1;
 
+// --- Restoring what the meteor broke ---
+// Per the park design (vault specs/2026-08-02-park-design.md, "Damage and
+// repair"): rebuilding is meant to be cheaper than building — the lot, roads
+// and footprint all survive, only the structure is gone. A levelled building
+// comes back in ONE day whatever it originally cost. A park is never
+// destroyed outright, only scorched in part, so its cost scales with the
+// damage. Both occupy the single build slot and ride the ordinary multi-day
+// machine (progress, stalls, rescue, pushes). Mirrored in the app's
+// `src/utils/restore.ts` — change both together.
+export const RESTORE_BUILDING_DAYS = 1;
+
+/** Days to restore a park with `damagedCells` damaged cells: 1–4. */
+export function parkRestoreDays(damagedCells: number): number {
+  return Math.min(4, Math.max(1, Math.ceil(damagedCells / 4)));
+}
+
+/** How many cells of a park are damaged (any level). */
+export function damagedCellCount(damage: Record<string, 1 | 2> | null | undefined): number {
+  return Object.keys(damage ?? {}).length;
+}
+
 // --- 7-day inactivity meteor ---
 // If a group logs no goal completions for this many consecutive days, a
 // meteor damages the city on the next day-process — regardless of whether
@@ -81,6 +102,20 @@ export interface CurrentBuild {
    * and still lands wherever the city has room.
    */
   target_tile?: { row: number; col: number };
+  /**
+   * Restore THIS park's damage instead of founding a new park.
+   *
+   * Set only by `repairPark`. The build's `type` is still the park's catalog
+   * id (so every label, icon and push reads naturally), which is exactly why
+   * this marker must survive a stall and a rescue: without it, a rescued
+   * restoration would land as a brand-new park.
+   */
+  target_park?: string;
+}
+
+/** True when this build puts something back rather than adding to the city. */
+export function isRestoreBuild(build: { target_tile?: unknown; target_park?: unknown } | null | undefined): boolean {
+  return !!build && (build.target_tile != null || build.target_park != null);
 }
 
 export interface PendingEvent {
@@ -95,6 +130,8 @@ export interface PendingEvent {
   tiles_destroyed?: Array<{ row: number; col: number }>;
   building?: string;
   tile?: number[];
+  /** A restoration landed (the build put something back). */
+  restored?: boolean;
   timestamp: string;
 }
 
@@ -106,6 +143,9 @@ export interface AbandonedBuild {
   days_required: number;
   days_completed: number;
   abandoned_on: string; // "YYYY-MM-DD" the missed day that stopped the build
+  /** Carried from a stalled restoration so a rescue still restores. */
+  target_tile?: { row: number; col: number };
+  target_park?: string;
 }
 
 export interface BrokenStreak {
@@ -607,6 +647,32 @@ export interface LandBuildResult {
 export function landBuild(p: LandBuildParams): LandBuildResult | null {
   const { currentBuild, cityMap, parks, tileBuildDates, rubbleOrigins, landedOn, nowIso } = p;
   const freezes = Math.min(FREEZE_CAP, p.streakFreezes + 1);
+
+  // A park restoration clears that park's damage in place. Checked before the
+  // footprint branch, because a restoration carries the park's own catalog id
+  // as its type and would otherwise found a second park.
+  if (currentBuild.target_park != null) {
+    const targetId = currentBuild.target_park;
+    const found = parks.some((pk) => pk.park_id === targetId);
+    return {
+      current_build: null,
+      // A park that vanished mid-restoration leaves nothing to fix; the build
+      // still completes rather than wedging the slot.
+      ...(found
+        ? { parks: parks.map((pk) => (pk.park_id === targetId ? { ...pk, damage: {} } : pk)) }
+        : {}),
+      pending_event: {
+        event_id: makeEventId(),
+        type: "build_complete",
+        building: currentBuild.type,
+        tile: [0, 0],
+        restored: true,
+        timestamp: nowIso,
+      },
+      streak_freezes: freezes,
+    };
+  }
+
   const footprint = parkFootprint(currentBuild.type);
 
   if (footprint) {
@@ -664,6 +730,7 @@ export function landBuild(p: LandBuildParams): LandBuildResult | null {
       type: "build_complete",
       building: currentBuild.type,
       tile,
+      ...(targetFree ? { restored: true } : {}),
       timestamp: nowIso,
     },
     streak_freezes: freezes,
@@ -927,6 +994,9 @@ export function processEndOfDay(params: {
         days_required: currentBuild.days_required,
         days_completed: currentBuild.days_completed,
         abandoned_on: processingDate,
+        // A stalled restoration stays a restoration through a rescue.
+        ...(currentBuild.target_tile ? { target_tile: currentBuild.target_tile } : {}),
+        ...(currentBuild.target_park ? { target_park: currentBuild.target_park } : {}),
       };
     }
   }
@@ -1163,6 +1233,8 @@ export function applyBuildRescue(params: {
       type: abandonedBuild!.type,
       days_required: abandonedBuild!.days_required,
       days_completed: abandonedBuild!.days_completed,
+      ...(abandonedBuild!.target_tile ? { target_tile: abandonedBuild!.target_tile } : {}),
+      ...(abandonedBuild!.target_park ? { target_park: abandonedBuild!.target_park } : {}),
     },
     abandoned_build: null,
     streak_freezes: streakFreezes - 1,

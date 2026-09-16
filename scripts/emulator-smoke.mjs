@@ -650,6 +650,97 @@ async function main() {
     JSON.stringify(rescuedRoll.result?.frozen_dates ?? rescuedRoll));
   await call('deleteGroup', { group_id: r.group_id }, dev);
 
+  console.log('— restoring what the meteor broke —');
+  // Park-design rules: a levelled building restores in ONE day whatever it
+  // cost; a damaged park is fixed in place in 1–4 days by damage. Both take
+  // the build slot. Seeded directly — a real meteor is random.
+  const rt = (await call(
+    'createGroup',
+    { group_name: 'Restore Town', member: 'Christian', daily_goal: 'Walk', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  )).result;
+  const rtDoc = (await readDoc(`groups/${rt.group_id}`, dev)).body.fields;
+  const rtMap = rtDoc.city_map;
+  rtMap.mapValue.fields['0'].arrayValue.values[0] = { stringValue: 'rubble' };
+  const intVal = (n) => ({ integerValue: String(n) });
+  const restoreSeed = {
+    city_map: rtMap,
+    rubble_origins: { mapValue: { fields: { '0,0': { stringValue: 'skyscraper_slim' } } } },
+    parks: {
+      arrayValue: {
+        values: [{
+          mapValue: {
+            fields: {
+              park_id: { stringValue: 'pk_smoke' },
+              cells: intVal(9),
+              built_at_buildings: intVal(0),
+              built_on: { stringValue: ymdDaysAgo(3) },
+              // Five damaged cells → ceil(5 / 4) = 2 days.
+              damage: { mapValue: { fields: { 0: intVal(1), 1: intVal(1), 2: intVal(2), 3: intVal(1), 4: intVal(1) } } },
+            },
+          },
+        }],
+      },
+    },
+  };
+  await adminPatch(`groups/${rt.group_id}`, restoreSeed, Object.keys(restoreSeed));
+
+  const tileRepair = await call('repairTile', { group_id: rt.group_id, row: 0, col: 0 }, dev);
+  check('repairTile starts a 1-day restoration of a 7-day building',
+    tileRepair.result?.current_build?.type === 'skyscraper_slim' &&
+      tileRepair.result?.current_build?.days_required === 1,
+    JSON.stringify(tileRepair.result?.current_build ?? tileRepair));
+  check('repairTile aims at the ruined lot',
+    tileRepair.result?.current_build?.target_tile?.row === 0 &&
+      tileRepair.result?.current_build?.target_tile?.col === 0);
+  const parkWhileBusy = await call('repairPark', { group_id: rt.group_id, park_id: 'pk_smoke' }, dev);
+  check('repairPark refused while a build holds the slot', parkWhileBusy.error === 'FAILED_PRECONDITION',
+    JSON.stringify(parkWhileBusy));
+
+  const tileDone = await call('completeGoal', { group_id: rt.group_id }, dev);
+  const tileAfter = (await readDoc(`groups/${rt.group_id}`, dev)).body.fields;
+  check('completing the day lands the restoration on its own lot',
+    tileAfter.city_map.mapValue.fields['0'].arrayValue.values[0]?.stringValue === 'skyscraper_slim',
+    JSON.stringify(tileAfter.city_map.mapValue.fields['0'].arrayValue.values[0]));
+  check('the landing is marked restored', tileDone.result?.pending_event?.restored === true,
+    JSON.stringify(tileDone.result?.pending_event));
+  check('the ruin leaves the ledger', !tileAfter.rubble_origins?.mapValue?.fields?.['0,0']);
+
+  const parkSameDay = await call('repairPark', { group_id: rt.group_id, park_id: 'pk_smoke' }, dev);
+  check('repairPark refused on a day a build already landed', parkSameDay.error === 'FAILED_PRECONDITION',
+    JSON.stringify(parkSameDay));
+
+  // Next day, as far as the slot rules care.
+  await adminPatch(`groups/${rt.group_id}`, { landed_on: { nullValue: null }, completions_today: { arrayValue: {} } },
+    ['landed_on', 'completions_today']);
+  const unknownPark = await call('repairPark', { group_id: rt.group_id, park_id: 'pk_nope' }, dev);
+  check('repairPark rejects an unknown park', unknownPark.error === 'NOT_FOUND', JSON.stringify(unknownPark));
+  const parkRepair = await call('repairPark', { group_id: rt.group_id, park_id: 'pk_smoke' }, dev);
+  check('repairPark costs days by damage (5 cells → 2 days)',
+    parkRepair.result?.current_build?.days_required === 2 &&
+      parkRepair.result?.current_build?.target_park === 'pk_smoke',
+    JSON.stringify(parkRepair.result?.current_build ?? parkRepair));
+
+  await adminPatch(`groups/${rt.group_id}`, {
+    current_build: {
+      mapValue: {
+        fields: {
+          type: { stringValue: 'park_small' },
+          days_required: intVal(2),
+          days_completed: intVal(1),
+          target_park: { stringValue: 'pk_smoke' },
+        },
+      },
+    },
+  }, ['current_build']);
+  const parkDone = await call('completeGoal', { group_id: rt.group_id }, dev);
+  const parksAfter = parkDone.result?.parks ?? [];
+  check('finishing the restoration clears the park in place',
+    parksAfter.length === 1 && Object.keys(parksAfter[0]?.damage ?? {}).length === 0,
+    JSON.stringify(parksAfter));
+  check('the park restoration is marked restored', parkDone.result?.pending_event?.restored === true);
+  await call('deleteGroup', { group_id: rt.group_id }, dev);
+
   console.log('— leave / delete cleanup —');
   const bobLeaves = await call('leaveGroup', { group_id: g.group_id }, bob);
   check('member leaves', bobLeaves.result?.success === true, JSON.stringify(bobLeaves));
