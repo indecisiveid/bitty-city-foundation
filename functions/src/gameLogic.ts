@@ -1126,21 +1126,37 @@ export function isRescuableBuild(
 // (no record, window passed, another build already running) or the group
 // holds no freezes. Progress is preserved exactly: `days_completed` is
 // untouched, so the crew gets a fresh shot at the day they missed.
+//
+// The freeze covers the STREAK for the missed day too. The missed day's
+// label (`abandoned_on`) is not in `frozen_dates` yet — the pass that stalls
+// the build only settles gap days before it, and charges that label on the
+// NEXT pass (see the freeze-consumption block in processEndOfDay). Without
+// recording it here, one miss cost two freezes (rescue today, auto-burn
+// tomorrow), or broke the streak the morning after the crew spent their last
+// freeze "saving" it. One freeze, one missed day, both the build and the
+// chain kept — which is what the rescue sheet promises.
 // ---------------------------------------------------------------------------
 
 export function applyBuildRescue(params: {
   abandonedBuild: AbandonedBuild | null;
   currentBuild: CurrentBuild | null;
   streakFreezes: number;
+  /** Absent only in older callers; the missed day is still frozen from an
+   *  empty list. */
+  frozenDates?: string[];
   todayStr: string;
 }): {
   current_build: CurrentBuild;
   abandoned_build: null;
   streak_freezes: number;
+  frozen_dates: string[];
 } | null {
-  const { abandonedBuild, currentBuild, streakFreezes, todayStr } = params;
+  const { abandonedBuild, currentBuild, streakFreezes, frozenDates = [], todayStr } = params;
   if (!isRescuableBuild(abandonedBuild, currentBuild, todayStr)) return null;
   if (streakFreezes < 1) return null;
+
+  const missed = abandonedBuild!.abandoned_on;
+  const frozen = frozenDates.includes(missed) ? [...frozenDates] : [...frozenDates, missed];
 
   return {
     current_build: {
@@ -1150,6 +1166,7 @@ export function applyBuildRescue(params: {
     },
     abandoned_build: null,
     streak_freezes: streakFreezes - 1,
+    frozen_dates: frozen,
   };
 }
 
@@ -1157,10 +1174,17 @@ export function applyBuildRescue(params: {
 // applyStreakRepair — one-tap repair of a recently broken streak
 //
 // Retroactively freezes the gap days from the break's `last_active_date`
-// through yesterday (relative to `todayStr`, the current day in the group's
-// timezone), reconnecting the old chain. Free, one shot per break — the
-// record is cleared on use. Returns null when there is nothing repairable
-// (no record, or the break is older than REPAIR_WINDOW_DAYS).
+// through `todayStr` (the current day label in the group's timezone),
+// reconnecting the old chain. Free, one shot per break — the record is
+// cleared on use. Returns null when there is nothing repairable (no record,
+// or the break is older than REPAIR_WINDOW_DAYS).
+//
+// Through TODAY, inclusive, not yesterday. `todayStr` is a settlement label:
+// the pass that just ran settled the game day before it under that label,
+// and if that day was missed too (the usual case — you notice the break the
+// morning after) the label is a hole the next pass would charge again,
+// re-breaking a streak that visibly read as repaired. A label the crew
+// actually completed is skipped, as are paused days.
 // ---------------------------------------------------------------------------
 
 export function applyStreakRepair(params: {
@@ -1185,9 +1209,15 @@ export function applyStreakRepair(params: {
   const lastActive = parseYmd(brokenStreak.last_active_date);
   const today = parseYmd(todayStr);
   const frozen = [...frozenDates];
-  for (let d = lastActive + 1; d <= today - 1; d++) {
+  for (let d = lastActive + 1; d <= today; d++) {
     const ds = formatYmd(d);
-    if (!frozen.includes(ds) && !pausedDates.includes(ds)) frozen.push(ds);
+    if (
+      !frozen.includes(ds) &&
+      !pausedDates.includes(ds) &&
+      !buildingCompletions.includes(ds)
+    ) {
+      frozen.push(ds);
+    }
   }
 
   return {

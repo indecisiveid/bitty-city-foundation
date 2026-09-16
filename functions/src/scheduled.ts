@@ -1,8 +1,27 @@
 /**
- * Scheduled push notifications — the daily nudges (goal reminders +
- * streak-at-risk + meteor warning, escalated by urgency in reminderLogic).
+ * The 30-minute tick: day rollover first, then the daily nudges.
  *
- * Runs every 30 minutes. Each group has its own timezone, so a single global
+ * DAY ROLLOVER (`runDayRollover`). End-of-day processing used to be purely
+ * lazy — it ran only when a callable touched the group, i.e. when someone
+ * opened the app. On iOS nothing runs in the background, so a city whose
+ * reset time passed while its crew sat on Home, in another city, or with the
+ * app closed simply stayed on yesterday's state; and whoever eventually
+ * tapped in was the one who triggered the pass, so THEY got the "build
+ * stalled" push about the screen they were already looking at. The server
+ * now owns the clock: every tick settles every city whose boundary has
+ * passed, the live Firestore listeners carry the new state to every card, and
+ * the boundary pushes go to the whole crew within 30 minutes of reset time.
+ * The callables keep their nudge as a fallback for that half-hour gap; the
+ * pass is transactional, so the two can never double-settle a day.
+ *
+ * Rollover runs BEFORE the nudges on purpose: a nudge decided against an
+ * unsettled doc would say "Day 2 of 3" about a build that actually stalled at
+ * the boundary, or warn about a streak the pass is about to freeze.
+ *
+ * NUDGES (`runNudges`): goal reminders + streak-at-risk + meteor warning,
+ * escalated by urgency in reminderLogic.
+ *
+ * Each group has its own timezone, so a single global
  * tick can't "be 8am" for everyone at once — instead every run asks each group
  * "is it one of your nudge slots right now?" (decideNudge), and only the
  * matching slot fires. A per-slot guard (`reminders_sent_slots`, scoped to
@@ -32,11 +51,49 @@ import { buildProgressOf } from "./buildings";
 import { consolidate, NudgeEntry } from "./nudgeMessages";
 import { activeMembersOn, isDayPaused, rosterOf } from "./pauses";
 import { normalizeGameMode } from "./gameMode";
+import { dueForDayProcessing, maybeProcessDay } from "./groupHandlers";
 
 // Re-exported: the copy moved to nudgeMessages.ts, callers and tests did not.
 export { messageFor } from "./nudgeMessages";
 
 const db = () => getFirestore();
+
+/**
+ * The cities whose day boundary has passed since their last pass.
+ *
+ * Today this is a full scan filtered in memory — the same scan the nudges do,
+ * fine at launch scale. This is the seam for growth: when the group count
+ * makes a scan slow, stamp a `next_boundary_at` timestamp on each doc at the
+ * end of every pass and replace the body with a `where("next_boundary_at",
+ * "<=", now)` query. Nothing else needs to change.
+ */
+async function groupsDueForRollover(): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+  const snap = await db().collection("groups").get();
+  return snap.docs.filter((doc) => dueForDayProcessing(doc.data()));
+}
+
+/**
+ * Settle every city that is due. Each pass sends its own pushes (city grew,
+ * build stalled) exactly as the callable path does — the trigger is the only
+ * thing that changed. A failure on one city is logged and never stops the
+ * rest; the next tick simply tries it again.
+ */
+export async function runDayRollover(): Promise<{ due: number; settled: number }> {
+  const due = await groupsDueForRollover();
+  let settled = 0;
+  await Promise.all(
+    due.map(async (doc) => {
+      try {
+        const after = await maybeProcessDay(doc.id, doc.data());
+        if (after.last_processed_date !== doc.data().last_processed_date) settled++;
+      } catch (err) {
+        console.error("[rollover] failed", doc.id, err);
+      }
+    }),
+  );
+  if (due.length > 0) console.log("[rollover]", { due: due.length, settled });
+  return { due: due.length, settled };
+}
 
 async function runNudges(): Promise<void> {
   const snap = await db().collection("groups").get();
@@ -147,9 +204,13 @@ async function runNudges(): Promise<void> {
 
 // Every 30 minutes — the :30 slots (11:30, 17:30) need half-hour granularity.
 // The per-group timezone math inside decides who actually fires.
+//
+// Still exported as `dailyNudge`: that is the deployed function's name, and
+// renaming it would deploy a second scheduler beside the old one.
 export const dailyNudge = onSchedule(
   { schedule: "every 30 minutes", timeoutSeconds: 300, memory: "256MiB" },
   async () => {
+    await runDayRollover();
     await runNudges();
   },
 );

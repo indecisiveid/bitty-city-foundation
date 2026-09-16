@@ -14,11 +14,15 @@
  * Firestore read rules (member vs non-member vs users/{uid}).
  */
 
-const AUTH = 'http://127.0.0.1:9099';
-const FUNCTIONS = 'http://127.0.0.1:5001/bitty-city/us-central1';
-const FIRESTORE = 'http://127.0.0.1:8080';
+// Ports match firebase.json. Overridable so the smoke can target an emulator
+// started with an alternate config (another session already on the defaults).
+const port = (name, dflt) => process.env[`SMOKE_${name}_PORT`] ?? dflt;
+const AUTH = `http://127.0.0.1:${port('AUTH', 9099)}`;
+const FUNCTIONS_BASE = `http://127.0.0.1:${port('FUNCTIONS', 5001)}`;
+const FUNCTIONS = `${FUNCTIONS_BASE}/bitty-city/us-central1`;
+const FIRESTORE = `http://127.0.0.1:${port('FIRESTORE', 8080)}`;
 const PROJECT = 'bitty-city';
-const STORAGE = 'http://127.0.0.1:9199';
+const STORAGE = `http://127.0.0.1:${port('STORAGE', 9199)}`;
 const BUCKET = 'bitty-city.firebasestorage.app';
 
 // A 1×1 JPEG — small, valid, unmistakably an image.
@@ -157,6 +161,37 @@ async function adminPatch(path, fields, updateMask) {
     },
   );
   if (!res.ok) throw new Error(`adminPatch ${path} failed: ${res.status} ${await res.text()}`);
+}
+
+/**
+ * Fire the 30-minute scheduler the way Cloud Scheduler does. A v2 `onSchedule`
+ * is a Pub/Sub trigger, so the emulator has no plain HTTPS URL for it; it is
+ * invoked through the background-trigger route with a CloudEvent body. The
+ * trigger id is `<region>-<name>-0` — the `-0` is the emulator's index for
+ * Pub/Sub triggers (the 404 body lists every valid id if this ever drifts).
+ * Needs the pubsub emulator running (see firebase.json).
+ */
+async function fireSchedule(name = 'dailyNudge') {
+  const topic = `projects/${PROJECT}/topics/firebase-schedule-${name}`;
+  const now = new Date().toISOString();
+  const event = {
+    specversion: '1.0',
+    id: `smoke-${Date.now()}`,
+    source: `//pubsub.googleapis.com/${topic}`,
+    type: 'google.cloud.pubsub.topic.v1.messagePublished',
+    datacontenttype: 'application/json',
+    time: now,
+    data: { message: { data: 'e30=', messageId: '1', publishTime: now }, subscription: `${topic}-sub` },
+  };
+  const res = await fetch(`${FUNCTIONS_BASE}/functions/projects/${PROJECT}/triggers/us-central1-${name}-0`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/cloudevents+json' },
+    body: JSON.stringify(event),
+  });
+  // The route acknowledges as soon as the work is queued; give the runtime a
+  // beat to actually run the tick before the caller reads Firestore.
+  await new Promise((r) => setTimeout(r, 1500));
+  return res;
 }
 
 function ymdDaysAgo(n) {
@@ -556,6 +591,64 @@ async function main() {
     JSON.stringify(rescueAgain));
   const rescueByStranger = await call('rescueBuild', { group_id: g.group_id });
   check('rescueBuild requires auth', rescueByStranger.error === 'UNAUTHENTICATED');
+
+  console.log('— scheduled day rollover —');
+  // The server settles days on its own clock (scheduled.ts → runDayRollover).
+  // Seed a second city whose boundary passed with a 3-day build one day in
+  // and nobody complete, then fire the 30-minute tick (see fireSchedule). No
+  // callable touches the city: if it settles, the server did it.
+  const rolled = await call(
+    'createGroup',
+    { group_name: 'Rollover Town', member: 'Christian', daily_goal: 'Walk', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  );
+  const r = rolled.result;
+  const rolloverSeed = {
+    current_build: {
+      mapValue: {
+        fields: {
+          type: { stringValue: 'apartment_c' },
+          days_required: { integerValue: '3' },
+          days_completed: { integerValue: '1' },
+        },
+      },
+    },
+    building_completions: {
+      arrayValue: {
+        values: [
+          { stringValue: ymdDaysAgo(3) },
+          { stringValue: ymdDaysAgo(2) },
+          { stringValue: ymdDaysAgo(1) },
+        ],
+      },
+    },
+    streak: { integerValue: '3' },
+    streak_freezes: { integerValue: '1' },
+    last_processed_date: { stringValue: ymdDaysAgo(1) },
+    last_activity_date: { stringValue: ymdDaysAgo(1) },
+    completions_today: { arrayValue: {} },
+    created_at: { timestampValue: new Date(Date.now() - 20 * 86400000).toISOString() },
+  };
+  await adminPatch(`groups/${r.group_id}`, rolloverSeed, Object.keys(rolloverSeed));
+  const tick = await fireSchedule();
+  check('scheduler tick accepted', tick.ok, `status=${tick.status}`);
+  const rolledDoc = await readDoc(`groups/${r.group_id}`, dev);
+  const rf = rolledDoc.body?.fields ?? {};
+  check('tick settled the day with no callable', rf.last_processed_date?.stringValue === ymdDaysAgo(0),
+    JSON.stringify(rf.last_processed_date));
+  check('tick parked the stalled build for rescue',
+    rf.abandoned_build?.mapValue?.fields?.days_completed?.integerValue === '1' && rf.current_build?.nullValue === null,
+    JSON.stringify(rf.abandoned_build));
+  check('tick kept the streak (yesterday anchor)', rf.streak?.integerValue === '3', JSON.stringify(rf.streak));
+  const tick2 = await fireSchedule();
+  const rolledAgain = await readDoc(`groups/${r.group_id}`, dev);
+  check('second tick is a no-op',
+    tick2.ok && JSON.stringify(rolledAgain.body?.fields?.abandoned_build) === JSON.stringify(rf.abandoned_build));
+  const rescuedRoll = await call('rescueBuild', { group_id: r.group_id }, dev);
+  check('rescue after a server-settled day freezes the missed day',
+    (rescuedRoll.result?.frozen_dates ?? []).includes(ymdDaysAgo(0)),
+    JSON.stringify(rescuedRoll.result?.frozen_dates ?? rescuedRoll));
+  await call('deleteGroup', { group_id: r.group_id }, dev);
 
   console.log('— leave / delete cleanup —');
   const bobLeaves = await call('leaveGroup', { group_id: g.group_id }, bob);

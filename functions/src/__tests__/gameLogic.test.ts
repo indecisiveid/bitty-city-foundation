@@ -523,7 +523,50 @@ describe("isRescuableBuild / applyBuildRescue", () => {
       current_build: { type: "skyscraper", days_required: 7, days_completed: 4 },
       abandoned_build: null,
       streak_freezes: 1,
+      // The freeze covers the missed day for the streak as well.
+      frozen_dates: ["2026-05-03"],
     });
+  });
+
+  it("freezes the missed day so the next pass does not charge it again", () => {
+    // Chain alive through 05-02 (settled label); 05-03 stalled the build.
+    // The crew's LAST freeze goes to the rescue on 05-03, then everyone
+    // completes — the 05-04 pass must not re-bill the miss and break the
+    // chain it was just paid to keep.
+    const completions = ["2026-04-30", "2026-05-01", "2026-05-02"];
+    const rescued = applyBuildRescue({
+      abandonedBuild: { ...offer, abandoned_on: "2026-05-03" },
+      currentBuild: null,
+      streakFreezes: 1,
+      frozenDates: [],
+      todayStr: "2026-05-03",
+    })!;
+    expect(rescued.streak_freezes).toBe(0);
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        currentBuild: rescued.current_build,
+        buildingCompletions: completions,
+        frozenDates: rescued.frozen_dates,
+        streakFreezes: rescued.streak_freezes,
+        cityMap: mapWithHouses(5),
+      }),
+    );
+    expect(updates.broken_streak).toBeNull();
+    expect(updates.streak_freezes).toBe(0); // nothing burned twice
+    expect(updates.frozen_dates).toEqual(["2026-05-03"]);
+    expect(updates.streak).toBe(4); // 04-30, 05-01, 05-02, ❄ 05-03, 05-04
+  });
+
+  it("does not duplicate a label that is already frozen", () => {
+    const result = applyBuildRescue({
+      abandonedBuild: offer,
+      currentBuild: null,
+      streakFreezes: 2,
+      frozenDates: ["2026-05-03"],
+      todayStr: TODAY,
+    })!;
+    expect(result.frozen_dates).toEqual(["2026-05-03"]);
   });
 
   it("refuses with zero freezes — the build is lost", () => {
@@ -870,19 +913,44 @@ describe("applyStreakRepair", () => {
     "2026-04-30",
   ];
 
-  it("restores the streak by freezing the gap through yesterday", () => {
+  it("restores the streak by freezing the gap through the just-settled day", () => {
     const result = applyStreakRepair({
       buildingCompletions: COMPLETIONS,
       frozenDates: [],
       brokenStreak: BROKEN,
-      todayStr: TODAY, // 2026-05-04
+      todayStr: TODAY, // 2026-05-04 — a settled label the crew also missed
     });
     expect(result).not.toBeNull();
-    expect(result!.frozen_dates).toEqual(
-      expect.arrayContaining(["2026-05-01", "2026-05-02", "2026-05-03"]),
-    );
+    expect(result!.frozen_dates).toEqual([
+      "2026-05-01",
+      "2026-05-02",
+      "2026-05-03",
+      "2026-05-04",
+    ]);
     expect(result!.streak).toBe(5);
     expect(result!.broken_streak).toBeNull();
+  });
+
+  it("a morning-after repair holds through the next pass", () => {
+    // Repaired on 05-04 with no freezes; everyone completes that day. The
+    // 05-05 pass used to find 05-04 unfrozen and break the chain again.
+    const repaired = applyStreakRepair({
+      buildingCompletions: COMPLETIONS,
+      frozenDates: [],
+      brokenStreak: BROKEN,
+      todayStr: TODAY,
+    })!;
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        buildingCompletions: COMPLETIONS,
+        frozenDates: repaired.frozen_dates,
+        streakFreezes: 0,
+        processingDate: "2026-05-05",
+      }),
+    );
+    expect(updates.broken_streak).toBeNull();
+    expect(updates.streak).toBe(6);
   });
 
   it("returns null when there is no broken streak", () => {
@@ -915,6 +983,8 @@ describe("applyStreakRepair", () => {
       todayStr: TODAY,
     });
     expect(repaired!.streak).toBe(6);
+    // A label the crew actually completed is never re-labelled as frozen.
+    expect(repaired!.frozen_dates).not.toContain(TODAY);
   });
 });
 
@@ -1268,7 +1338,12 @@ describe("applyStreakRepair — vacation mode", () => {
       brokenStreak: { value: 2, broken_on: "2026-05-01", last_active_date: "2026-04-29" },
       todayStr: TODAY,
     });
-    expect(result?.frozen_dates).toEqual(["2026-04-30", "2026-05-02", "2026-05-03"]);
+    expect(result?.frozen_dates).toEqual([
+      "2026-04-30",
+      "2026-05-02",
+      "2026-05-03",
+      "2026-05-04",
+    ]);
     expect(result?.streak).toBe(2);
   });
 });

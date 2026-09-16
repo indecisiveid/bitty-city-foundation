@@ -87,9 +87,20 @@ group_ids[]}` (cross-device restore + 100-groups cap).
   so one day's check-ins never land two buildings. Tiles are stamped with the
   GAME DAY the crew completed on (= the proof ledger key), not the settlement
   label.
-- **Day processing is lazy**: `maybeProcessDay` runs when a callable touches
-  the group (the app nudges `getGroup` on open). One pass settles the whole
-  gap since `last_processed_date`.
+- **Day processing runs on the server clock**: the 30-minute scheduler
+  (`scheduled.ts` → `runDayRollover`) settles every city whose boundary has
+  passed, then decides nudges against the settled state. Callables still
+  call `maybeProcessDay` as a fallback for the gap before the next tick (and
+  for landing today's build immediately, per the bullet above). The pass is
+  a transaction that re-checks `last_processed_date`, so the two paths can't
+  double-settle or clobber each other. One pass settles the whole gap since
+  `last_processed_date`.
+- **Settlement labels run a day ahead of game days**, and the pass that
+  settles a missed day only charges gap days *before* it — the label itself
+  is charged on the next pass. Any in-day action that spends or grants
+  forgiveness (`applyBuildRescue`, `applyStreakRepair`) must therefore
+  freeze the just-settled label too, or the next pass bills the same miss
+  twice.
 - **Freezes** protect the streak counter only. The **7-day inactivity
   meteor** (no completions for ≥7 days → destroy ceil(20%), max 10,
   throttled to one per 7 days) fires regardless of freezes and regardless
@@ -112,8 +123,13 @@ cd functions && npm test          # jest (gameLogic suite)
 # Emulators (Java via brew: PATH="/opt/homebrew/opt/openjdk/bin:$PATH").
 # The emulator PROMPTS for any param missing from functions/.env (even with a
 # default) — add --non-interactive so a missing one fails instead of hanging.
-firebase emulators:start --only auth,functions,firestore,storage --project bitty-city
-node scripts/emulator-smoke.mjs   # 44-check end-to-end smoke
+# pubsub is required now too — the scheduled day-rollover function is a
+# Pub/Sub trigger and is silently ignored by the emulator without it.
+firebase emulators:start --only auth,functions,firestore,storage,pubsub --project bitty-city --non-interactive
+node scripts/emulator-smoke.mjs   # 121-check end-to-end smoke (pubsub: the scheduler section)
+# Ports busy (another session's emulator)? Start yours from a copy of
+# firebase.json with other ports and run the smoke with
+# SMOKE_{AUTH,FUNCTIONS,FIRESTORE,STORAGE}_PORT=… set.
 
 npm --prefix functions run deploy # prod deploy (needs Chris/Christian creds)
 ```

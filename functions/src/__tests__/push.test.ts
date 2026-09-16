@@ -17,6 +17,11 @@ describe("apsFor", () => {
     const aps = apsFor({ ...base, categoryId: NotificationCategory.TEAMMATE_COMPLETED });
     expect(aps.category).toBe("bitty.teammate-completed");
   });
+
+  it("stamps aps.threadId so one city's pushes stack together", () => {
+    expect(apsFor({ ...base, threadId: "group-1" }).threadId).toBe("group-1");
+    expect(apsFor(base)).not.toHaveProperty("threadId");
+  });
 });
 
 describe("dataFor", () => {

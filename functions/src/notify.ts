@@ -96,6 +96,8 @@ function withGroupData(
 ): PushPayload {
   return {
     ...payload,
+    // One notification stack per city on iOS (see PushPayload.threadId).
+    threadId: payload.threadId ?? groupId,
     data: {
       group_id: groupId,
       group_name: data.group_name ?? "",

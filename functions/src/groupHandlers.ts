@@ -193,16 +193,25 @@ async function ensureBuildOrder(
   return { ...data, build_order: order };
 }
 
-export async function maybeProcessDay(
-  groupId: string,
+/** Is this group's day boundary behind its last pass? Pure read of the doc. */
+export function dueForDayProcessing(data: FirebaseFirestore.DocumentData): boolean {
+  return needsDayProcessing(
+    data.goal_reset_time,
+    data.last_processed_date ?? null,
+    data.goal_reset_timezone ?? "UTC",
+  );
+}
+
+/**
+ * Everything one end-of-day pass writes for `data`, or null if the group is
+ * not due. Pure apart from the clock and the RNG inside processEndOfDay, so
+ * it can run inside a transaction and be recomputed on retry.
+ */
+function dayUpdatesFor(
   data: FirebaseFirestore.DocumentData,
-): Promise<FirebaseFirestore.DocumentData> {
-  data = await ensureBuildOrder(groupId, data);
-  data = await ensurePlanAnchor(groupId, data);
+): Record<string, unknown> | null {
   const goalResetTimezone: string = data.goal_reset_timezone ?? "UTC";
-  if (!needsDayProcessing(data.goal_reset_time, data.last_processed_date, goalResetTimezone)) {
-    return data;
-  }
+  if (!dueForDayProcessing(data)) return null;
 
   const processingDate = getProcessingDate(data.goal_reset_time, goalResetTimezone);
   const createdIso = createdAtIso(data);
@@ -235,7 +244,7 @@ export async function maybeProcessDay(
     nearMissDates: data.near_miss_dates ?? [],
   });
 
-  const writeUpdates: Record<string, unknown> = {
+  return {
     ...updates,
     last_processed_date: processingDate,
     // Kudos are a today-only thing: the day rolled over, so yesterday's
@@ -251,10 +260,45 @@ export async function maybeProcessDay(
     // The day the build landed on is over; the next pick is allowed again.
     landed_on: null,
   };
+}
 
-  await db().collection("groups").doc(groupId).update(writeUpdates);
+/**
+ * Settle any game days that have ended since the group's last pass.
+ *
+ * Two callers now: the scheduler (`scheduled.ts`, every 30 minutes — the
+ * path that makes cities roll over on the server clock, so cards update and
+ * pushes land at the boundary with nobody tapping) and every callable the app
+ * nudges (kept as the fallback for the gap between a boundary and the next
+ * tick). Because two of those can race at a boundary, the pass is a
+ * TRANSACTION that re-reads the doc and re-checks `last_processed_date`: the
+ * loser sees a settled day and writes nothing. A plain read-then-update here
+ * could clobber a rescue, repair or new build that landed in between with a
+ * pre-boundary copy of the whole state.
+ *
+ * Returns the doc as it stands after the pass (fresh, not the caller's copy).
+ */
+export async function maybeProcessDay(
+  groupId: string,
+  data: FirebaseFirestore.DocumentData,
+): Promise<FirebaseFirestore.DocumentData> {
+  data = await ensureBuildOrder(groupId, data);
+  data = await ensurePlanAnchor(groupId, data);
+  if (!dueForDayProcessing(data)) return data;
 
-  const merged = { ...data, ...writeUpdates };
+  const groupRef = db().collection("groups").doc(groupId);
+  const result = await db().runTransaction(async (tx) => {
+    const snap = await tx.get(groupRef);
+    if (!snap.exists) return null;
+    const fresh = snap.data()!;
+    const writeUpdates = dayUpdatesFor(fresh);
+    if (!writeUpdates) return { merged: fresh, writeUpdates: null };
+    tx.update(groupRef, writeUpdates);
+    return { merged: { ...fresh, ...writeUpdates }, writeUpdates };
+  });
+
+  if (!result) return data; // deleted underneath us
+  const { merged, writeUpdates } = result;
+  if (!writeUpdates) return merged; // someone else settled it first
 
   // "City grew" push: a build landed during this end-of-day pass. Whichever
   // caller triggered processing sends it; last_processed_date has advanced so
@@ -292,7 +336,10 @@ export async function maybeProcessDay(
     });
   }
 
-  return maybeSuggestEasyMode(groupId, merged, processingDate);
+  // `dayUpdatesFor` stamped `last_processed_date` onto `merged` with exactly
+  // the processing date this pass just settled (we only reach here when
+  // `writeUpdates` was non-null, i.e. this call did the settling).
+  return maybeSuggestEasyMode(groupId, merged, merged.last_processed_date as string);
 }
 
 /**
@@ -1033,6 +1080,9 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
       abandonedBuild: freshData.abandoned_build ?? null,
       currentBuild: freshData.current_build ?? null,
       streakFreezes: freshData.streak_freezes ?? 0,
+      // The rescue freezes the missed day as well, so the next pass doesn't
+      // charge it a second time — see applyBuildRescue.
+      frozenDates: freshData.frozen_dates ?? [],
       todayStr: today,
     });
 

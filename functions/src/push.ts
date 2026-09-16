@@ -54,6 +54,14 @@ export interface PushPayload {
    * and would otherwise lose its buttons).
    */
   categoryId?: string;
+  /**
+   * iOS `thread-id`: notifications sharing one stack together in Notification
+   * Center instead of interleaving. Group pushes use the group id, so a person
+   * in three cities sees three tidy stacks rather than one shuffled list —
+   * which matters now that the scheduler fires boundary pushes for every city
+   * on its own clock.
+   */
+  threadId?: string;
 }
 
 /** FCM registration tokens are opaque, non-empty strings. */
@@ -89,6 +97,7 @@ export function apsFor(payload: PushPayload): Aps {
     alert: { title: payload.title, body: payload.body },
     sound: "default",
     ...(payload.categoryId ? { category: payload.categoryId } : {}),
+    ...(payload.threadId ? { threadId: payload.threadId } : {}),
   };
 }
 
