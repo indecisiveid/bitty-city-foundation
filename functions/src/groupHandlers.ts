@@ -1,5 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, FieldPath } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { v4 as uuidv4 } from "uuid";
 import { DateTime } from "luxon";
@@ -52,9 +52,16 @@ import {
   snapProgress,
 } from "./gameMode";
 import { easyModeSuggestionMessage } from "./crewMessages";
-import { proofsBucket, proofObjectSize, deleteProofObject } from "./proofStorage";
+import { proofsBucket, proofObjectSize, deleteProofObject, deleteProofPrefix } from "./proofStorage";
 
 const db = () => getFirestore();
+
+/** Drop one member from a name-keyed proof bucket. */
+function withoutEntry(entries: Record<string, unknown> | null | undefined, name: string): Record<string, unknown> {
+  const out = { ...(entries ?? {}) };
+  delete out[name];
+  return out;
+}
 
 /** A member's pause leaves with them. */
 function withoutPause(pauses: MemberPauses | null | undefined, uid: string): MemberPauses {
@@ -1386,6 +1393,43 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
 
 // --- deleteGroup ---
 
+// --- Proof photo erasure ---
+//
+// Deleting a city or an account must take its proof photos with it (privacy
+// policy; App Store 5.1.1(v)). Photos live in Storage under
+// proofs/{groupId}/{uid}/, and who-posted-what lives in the day ledger
+// groups/{id}/days/{date}.proofs[memberName] plus today's proofs_today —
+// Firestore does NOT cascade-delete subcollections, so the ledger has to be
+// removed explicitly. Both run BEFORE the doc delete, and throw, so a failure
+// leaves the request retryable instead of reporting success with photos left.
+
+/** A whole city: every member's photos and the full day ledger. */
+async function eraseCityProofs(groupId: string): Promise<void> {
+  await deleteProofPrefix(`proofs/${groupId}/`, proofsBucket.value());
+  await db().recursiveDelete(db().collection("groups").doc(groupId).collection("days"));
+}
+
+/** One member leaving the app: their photos and their ledger entries only. */
+async function eraseMemberProofs(groupId: string, uid: string, name: string): Promise<void> {
+  await deleteProofPrefix(`proofs/${groupId}/${uid}/`, proofsBucket.value());
+  const groupRef = db().collection("groups").doc(groupId);
+  const days = await groupRef.collection("days").get();
+  let batch = db().batch();
+  let ops = 0;
+  for (const day of days.docs) {
+    const proofs = (day.data().proofs ?? {}) as Record<string, unknown>;
+    if (!(name in proofs)) continue;
+    // FieldPath, not a dotted string: display names can contain dots.
+    batch.update(day.ref, new FieldPath("proofs", name), FieldValue.delete());
+    if (++ops === 450) {
+      await batch.commit();
+      batch = db().batch();
+      ops = 0;
+    }
+  }
+  if (ops > 0) await batch.commit();
+}
+
 export const deleteGroup = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
   const { group_id } = request.data;
@@ -1409,6 +1453,8 @@ export const deleteGroup = onCall({ enforceAppCheck: true }, async (request) => 
       "Only the city's founder can delete it",
     );
   }
+
+  await eraseCityProofs(group_id);
 
   const code = data.group_code;
   const memberUids: string[] = data.member_uids ?? [];
@@ -1446,7 +1492,8 @@ export const deleteAccount = onCall({ enforceAppCheck: true }, async (request) =
     const data = snap.data()!;
 
     if (data.owner_uid === uid) {
-      // Founder: the city goes with them.
+      // Founder: the city goes with them, photos and ledger included.
+      await eraseCityProofs(groupId);
       const batch = db().batch();
       batch.delete(groupRef);
       batch.delete(db().collection("group_codes").doc(data.group_code));
@@ -1463,11 +1510,16 @@ export const deleteAccount = onCall({ enforceAppCheck: true }, async (request) =
       const idx = ((data.member_uids as string[]) ?? []).indexOf(uid);
       if (idx === -1) continue;
       const name = data.group_members[idx];
+      await eraseMemberProofs(groupId, uid, name);
       await groupRef.update({
         group_members: (data.group_members as string[]).filter((_, i) => i !== idx),
         member_uids: (data.member_uids as string[]).filter((_, i) => i !== idx),
         completions_today: (data.completions_today as string[]).filter((m) => m !== name),
         member_pauses: withoutPause(data.member_pauses, uid),
+        // Today's proof bucket is keyed by name too.
+        ...(data.proofs_today && typeof data.proofs_today === "object"
+          ? { "proofs_today.entries": withoutEntry(data.proofs_today.entries, name) }
+          : {}),
       });
     }
   }

@@ -58,7 +58,10 @@ async function putObject(key, body, user, contentType = 'image/jpeg') {
 
 /** Download as a user (rules apply). */
 async function getObject(key, user) {
-  const headers = user ? { Authorization: `Firebase ${user.idToken}` } : {};
+  // The emulator treats `Bearer owner` as admin (rules bypassed).
+  const headers = !user ? {} : user.idToken === 'owner'
+    ? { Authorization: 'Bearer owner' }
+    : { Authorization: `Firebase ${user.idToken}` };
   const res = await fetch(`${STORAGE}/v0/b/${BUCKET}/o/${encodeURIComponent(key)}?alt=media`, { headers });
   return { status: res.status, type: res.headers.get('content-type') ?? '' };
 }
@@ -136,6 +139,9 @@ async function call(name, data, user) {
 }
 
 /** Raw Firestore REST read as a given user — exercises security rules. */
+/** Emulator owner credentials — bypass rules, for asserting what's really stored. */
+const ADMIN = { idToken: 'owner' };
+
 async function readDoc(path, user) {
   const headers = {};
   if (user) headers.Authorization = `Bearer ${user.idToken}`;
@@ -320,6 +326,37 @@ async function main() {
   // up empty, so tear it down here (founder-only delete — also exercised).
   const pgDel = await call('deleteGroup', { group_id: pg.group_id }, dev);
   check('proof city deleted', pgDel.result?.success === true, JSON.stringify(pgDel));
+  // Deleting a city takes its photos and day ledger with it (privacy policy).
+  const photoAfterCity = await getObject(key, ADMIN);
+  check('deleteGroup erases the city\'s proof photos', photoAfterCity.status === 404, `status=${photoAfterCity.status}`);
+  const ledgerAfterCity = await readDoc(`groups/${pg.group_id}/days/${today}`, ADMIN);
+  check('deleteGroup erases the day ledger', ledgerAfterCity.status === 404, `status=${ledgerAfterCity.status}`);
+
+  console.log('— account deletion erases a member\'s proofs —');
+  const quinn = await signUp(`quinn-${Date.now()}@example.com`, 'password123');
+  const qc = (await call(
+    'createGroup',
+    { group_name: 'Quinn Proofs', member: 'Christian', daily_goal: 'Show it', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  )).result;
+  await call('joinGroup', { group_code: qc.group_code, member: 'Quinn' }, quinn);
+  const qKey = `proofs/${qc.group_id}/${quinn.uid}/quinn-${Date.now()}.jpg`;
+  const dKey = `proofs/${qc.group_id}/${dev.uid}/dev-${Date.now()}.jpg`;
+  await putObject(qKey, TINY_JPEG, quinn);
+  await putObject(dKey, TINY_JPEG, dev);
+  const qDone = await call('completeGoal', { group_id: qc.group_id, proof: { key: qKey } }, quinn);
+  await call('completeGoal', { group_id: qc.group_id, proof: { key: dKey } }, dev);
+  const qDay = qDone.result?.proofs_today?.date;
+  const qDel = await call('deleteAccount', {}, quinn);
+  check('member deleteAccount succeeds', qDel.result?.success === true, JSON.stringify(qDel));
+  check("member's proof photo erased", (await getObject(qKey, ADMIN)).status === 404);
+  check("other members' photos untouched", (await getObject(dKey, ADMIN)).status === 200);
+  const qLedger = (await readDoc(`groups/${qc.group_id}/days/${qDay}`, ADMIN)).body?.fields?.proofs?.mapValue?.fields ?? {};
+  check("member's ledger entry erased, others kept", !('Quinn' in qLedger) && 'Christian' in qLedger, JSON.stringify(Object.keys(qLedger)));
+  const qGroup = (await readDoc(`groups/${qc.group_id}`, ADMIN)).body?.fields;
+  const qToday = qGroup?.proofs_today?.mapValue?.fields?.entries?.mapValue?.fields ?? {};
+  check("member removed from today's proof bucket", !('Quinn' in qToday) && 'Christian' in qToday, JSON.stringify(Object.keys(qToday)));
+  await call('deleteGroup', { group_id: qc.group_id }, dev);
 
   console.log('— immediate landing —');
   const countBuilt = (cityMap) =>
