@@ -18,6 +18,7 @@ import { getProcessingDate } from "./gameLogic";
 import { memberNameForUid } from "./groupHandlers";
 import { applyNudge, nudgeBody, NudgeState } from "./nudges";
 import { notifyMembers } from "./notify";
+import { peerNudgeNotice } from "./eventMessages";
 import { requireAuth } from "./auth";
 import { isDayPaused, pausedMembersOn, rosterOf } from "./pauses";
 
@@ -105,11 +106,7 @@ export const sendNudge = onCall({ enforceAppCheck: true }, async (request) => {
   // Push the recipient — best-effort, after the write, and only when this
   // call is the one that recorded the nudge (a re-tap stays silent).
   if (isNew && finalData) {
-    await notifyMembers(group_id, finalData, [to_member], {
-      title: "⏰ Nudge!",
-      body: nudgeBody(fromName, goal),
-      data: { type: "nudge", from: fromName },
-    });
+    await notifyMembers(group_id, finalData, [to_member], peerNudgeNotice(fromName, nudgeBody(fromName, goal)));
   }
 
   return { success: true, is_new: isNew, nudges_today: nudgeState };

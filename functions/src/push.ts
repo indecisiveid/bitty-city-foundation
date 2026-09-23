@@ -62,6 +62,11 @@ export interface PushPayload {
    * on its own clock.
    */
   threadId?: string;
+  /**
+   * Deliver without sound or waking the screen (APNs interruption-level
+   * "passive") — quiet hours (notices.ts) never drop a push, they soften it.
+   */
+  quiet?: boolean;
 }
 
 /** FCM registration tokens are opaque, non-empty strings. */
@@ -95,7 +100,7 @@ function stringifyData(data?: Record<string, unknown>): Record<string, string> {
 export function apsFor(payload: PushPayload): Aps {
   return {
     alert: { title: payload.title, body: payload.body },
-    sound: "default",
+    ...(payload.quiet ? { "interruption-level": "passive" } : { sound: "default" }),
     ...(payload.categoryId ? { category: payload.categoryId } : {}),
     ...(payload.threadId ? { threadId: payload.threadId } : {}),
   };

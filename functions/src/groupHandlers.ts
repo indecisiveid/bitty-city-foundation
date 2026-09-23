@@ -33,11 +33,11 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
+import { notice, cityGrewNotice, buildStalledNotice, teammateCompletedNotice, nextUpNotice, restoringNotice, buildRescuedNotice, streakRepairedNotice } from "./eventMessages";
 import { touchLastSeen, localMinutesOf } from "./presence";
 import { joinedMessage, leftMessage } from "./crewMessages";
 import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
-import { NotificationCategory } from "./push";
-import { buildProgressOf, withArticle } from "./buildings";
+import { buildProgressOf } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor, minBuildingsFor } from "./buildCatalog";
 import { isProofKeyFor, applyProof, ProofEntry, MAX_PROOF_BYTES } from "./proofs";
 import {
@@ -366,15 +366,7 @@ export async function maybeProcessDay(
     await notifyAllMembers(
       groupId,
       merged,
-      event.restored
-        ? {
-            title: `🧱 ${merged.group_name ?? "Your city"} is whole again`,
-            body: `Your crew restored ${withArticle(label)}. Come see it in the city.`,
-          }
-        : {
-            title: `🏙️ ${merged.group_name ?? "Your city"} grew!`,
-            body: `Your crew finished ${withArticle(label)}. Come see it in the city.`,
-          },
+      cityGrewNotice(merged.group_name ?? "Your city", label, !!event.restored),
     );
   }
 
@@ -388,22 +380,12 @@ export async function maybeProcessDay(
     | null
     | undefined;
   if (stalled) {
-    const label = labelFor(stalled.type ?? "");
-    const mode = normalizeGameMode(merged.game_mode);
-    // What a miss IS depends on the mode: hard stalls when anyone is missing,
-    // easy only when nobody finished at all.
-    const why = mode === "easy" ? "Nobody finished yesterday." : "Not everyone finished yesterday.";
-    await notifyAllMembers(groupId, merged, {
-      title: `🚧 ${label} stalled`,
-      body:
-        // Hard mode doesn't name the easy-mode switch: 1.2 and older can't
-        // save a build that way (their mode switch sends no rescue_build),
-        // so the push would promise what their app can't do. Name it again
-        // once every install has the stall sheet that offers it.
-        mode === "hard"
-          ? `${why} No hard hats left. Open the city today to see your options.`
-          : `${why} No hard hats left. Pick a new build.`,
-    });
+    // What a miss IS depends on the mode (see buildStalledNotice).
+    await notifyAllMembers(
+      groupId,
+      merged,
+      buildStalledNotice(labelFor(stalled.type ?? ""), normalizeGameMode(merged.game_mode)),
+    );
   }
 
   // `dayUpdatesFor` stamped `last_processed_date` onto `merged` with exactly
@@ -440,14 +422,10 @@ export async function maybeSuggestEasyMode(
   await notifyAllMembers(
     groupId,
     merged,
-    {
-      ...easyModeSuggestionMessage(
-        merged.group_name ?? "your city",
-        suggestion.near_misses,
-        NEAR_MISS_WINDOW_DAYS,
-      ),
-      data: { type: "mode_suggestion" },
-    },
+    notice(
+      easyModeSuggestionMessage(merged.group_name ?? "your city", suggestion.near_misses, NEAR_MISS_WINDOW_DAYS),
+      { type: "mode_suggestion", category: "crew", priority: "normal", variant: "mode_suggestion.v1" },
+    ),
   );
   return merged;
 }
@@ -659,10 +637,9 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
       groupId,
       finalData,
       others,
-      joinedMessage(
-        joinedName,
-        finalData.group_name ?? "your city",
-        (finalData.group_members ?? []).length,
+      notice(
+        joinedMessage(joinedName, finalData.group_name ?? "your city", (finalData.group_members ?? []).length),
+        { type: "member_joined", category: "crew", priority: "normal", variant: "member_joined.v1" },
       ),
     );
   }
@@ -897,16 +874,12 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       (m: string) => !done.includes(m),
     );
     if (stillPending.length > 0) {
-      await notifyMembers(group_id, finalData!, stillPending, {
-        title: finalData!.group_name ?? "Bitty City",
-        body: `${completedName} completed today's goal. Your turn!`,
-        // Everyone on this list has NOT completed yet, and `completedName`
-        // has — exactly the precondition `sendKudos` enforces — so the
-        // notification can carry a one-tap **Send kudos** button. The name
-        // travels in the data payload; the app never guesses the recipient.
-        categoryId: NotificationCategory.TEAMMATE_COMPLETED,
-        data: { type: "teammate_completed", completed_by: completedName },
-      });
+      await notifyMembers(
+        group_id,
+        finalData!,
+        stillPending,
+        teammateCompletedNotice(finalData!.group_name ?? "Bitty City", completedName),
+      );
     } else {
       // That was the last one — the whole crew is in. Celebrate the day and
       // point at what's next. If this completion landed the build, the copy
@@ -915,7 +888,12 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       await notifyAllMembers(
         group_id,
         finalData!,
-        dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!),
+        notice(dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!), {
+          type: "day_complete",
+          category: "crew",
+          priority: "normal",
+          variant: landedBuild ? "day_complete.landed.v1" : "day_complete.v1",
+        }),
       );
     }
   }
@@ -1015,16 +993,10 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
   // "Someone picked the next build" push → tell the rest of the crew what
   // they're working toward. Best-effort, after the write.
   if (pickerName) {
-    const label = labelFor(type);
-    const days: number = daysFor(type)!;
-    const span = days === 1 ? "Today's goal builds it." : `It takes ${days} days of everyone completing their goal.`;
     await notifyAllMembers(
       group_id,
       finalData!,
-      {
-        title: `🏗️ Next up: ${withArticle(label)}`,
-        body: `${pickerName} picked ${withArticle(label)} for ${finalData!.group_name ?? "your city"}. ${span}`,
-      },
+      nextUpNotice(finalData!.group_name ?? "your city", pickerName, labelFor(type), finalData!.current_build?.days_required ?? daysFor(type)!),
       pickerName,
     );
   }
@@ -1059,11 +1031,6 @@ function assertBuildSlotFree(freshData: FirebaseFirestore.DocumentData): void {
   }
 }
 
-function restoreSpan(days: number): string {
-  return days === 1
-    ? "Today's goal restores it."
-    : `It takes ${days} days of everyone completing their goal.`;
-}
 
 /** Load the group, check membership, and settle any outstanding days. */
 async function loadSettled(
@@ -1145,10 +1112,7 @@ export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
     await notifyAllMembers(
       group_id,
       finalData!,
-      {
-        title: `🧱 Restoring ${withArticle(label)}`,
-        body: `${repairerName} is putting ${withArticle(label)} back up in ${finalData!.group_name ?? "your city"}. ${restoreSpan(RESTORE_BUILDING_DAYS)}`,
-      },
+      restoringNotice("building", finalData!.group_name ?? "your city", repairerName, label, RESTORE_BUILDING_DAYS),
       repairerName,
     );
   }
@@ -1205,10 +1169,7 @@ export const repairPark = onCall({ enforceAppCheck: true }, async (request) => {
     await notifyAllMembers(
       group_id,
       finalData!,
-      {
-        title: `🌳 Restoring ${withArticle(label)}`,
-        body: `${repairerName} is fixing up ${withArticle(label)} in ${finalData!.group_name ?? "your city"}. ${restoreSpan(days)}`,
-      },
+      restoringNotice("park", finalData!.group_name ?? "your city", repairerName, label, days),
       repairerName,
     );
   }
@@ -1293,10 +1254,7 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
     await notifyAllMembers(
       group_id,
       finalData!,
-      {
-        title: `🪖 The ${label} build is back on`,
-        body: `${rescuerName} used a hard hat to save it. Finish today's goal to keep it moving.`,
-      },
+      buildRescuedNotice(label, rescuerName),
       rescuerName,
     );
   }
@@ -1403,12 +1361,7 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
     await notifyAllMembers(
       group_id,
       finalData!,
-      {
-        title: `🧊 ${restoredValue}-day streak repaired`,
-        body: label
-          ? `${repairerName} used a hard hat to bring back your streak and your ${label} build. Finish today's goal to keep it moving.`
-          : `${repairerName} used a hard hat to bring back your streak.`,
-      },
+      streakRepairedNotice(restoredValue, repairerName, label ?? null),
       repairerName,
     );
   }
@@ -1491,11 +1444,12 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
       group_id,
       after,
       after.group_members,
-      leftMessage(
-        leftName,
-        after.group_name ?? "your city",
-        after.group_members.length,
-      ),
+      notice(leftMessage(leftName, after.group_name ?? "your city", after.group_members.length), {
+        type: "member_left",
+        category: "crew",
+        priority: "normal",
+        variant: "member_left.v1",
+      }),
     );
   }
 

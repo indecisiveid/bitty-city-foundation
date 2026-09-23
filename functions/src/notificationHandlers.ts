@@ -8,6 +8,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { requireAuth } from "./auth";
 import { isValidPushToken } from "./push";
 import { notifyUids } from "./notify";
+import { testNotice } from "./eventMessages";
 import { touchLastSeen } from "./presence";
 
 const db = () => getFirestore();
@@ -42,11 +43,7 @@ export const registerPushToken = onCall({ enforceAppCheck: true }, async (reques
  */
 export const sendTestPush = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
-  await notifyUids([uid], {
-    title: "Bitty City",
-    body: "🎉 Test notification — push is working!",
-    data: { test: "true" },
-  });
+  await notifyUids([uid], testNotice());
   return { success: true };
 });
 

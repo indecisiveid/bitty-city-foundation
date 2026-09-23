@@ -52,7 +52,8 @@ import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { DateTime } from "luxon";
 import { getProcessingDate, daysBetween } from "./gameLogic";
 import { decideNudge, SlotId } from "./reminderLogic";
-import { loadUsers, notifySnaps, uidsForNames } from "./notify";
+import { loadUsers, notifySnaps, recordSent, uidsForNames } from "./notify";
+import { NoticeMeta } from "./notices";
 import { buildProgressOf, landingTodayLabel } from "./buildings";
 import { consolidate, farewellMessage, NudgeEntry } from "./nudgeMessages";
 import { applyUserTier, reminderStateOf, sentTodayOf, tierFor } from "./reminderTiers";
@@ -228,8 +229,16 @@ export async function runNudges(now: Date = new Date()): Promise<void> {
       const sentToday = sentTodayOf(state, todayDate);
       if (decision.action === "farewell") {
         const cities = [...new Set(entries.map((e) => e.cityName))];
-        const single = entries.length === 1 ? { data: { group_id: entries[0].groupId } } : {};
-        if (userSnap) await notifySnaps([userSnap], { ...farewellMessage(cities), ...single });
+        const meta: NoticeMeta = { type: "farewell", category: "reminder", priority: "normal", variant: "farewell.v1" };
+        const single: Partial<ReturnType<typeof cityContext>> = entries.length === 1 ? cityContext(entries[0]) : {};
+        if (userSnap) {
+          await notifySnaps([userSnap], {
+            ...farewellMessage(cities),
+            threadId: single.threadId,
+            data: { ...(single.data ?? {}), type: meta.type, variant: meta.variant },
+          });
+          await recordSent(userSnap, meta, todayDate);
+        }
         await recordReminder(userSnap, {
           date: todayDate,
           sent: sentToday + 1,
@@ -240,10 +249,43 @@ export async function runNudges(now: Date = new Date()): Promise<void> {
 
       const payload = consolidate(decision.entries);
       if (!payload) return;
-      if (userSnap) await notifySnaps([userSnap], payload);
+      const meta = reminderMeta(decision.entries);
+      if (userSnap) {
+        // One city: stack it with that city's other notifications on iOS and
+        // let a tap open it (the multi-city push lands on Home by design).
+        const single: Partial<ReturnType<typeof cityContext>> =
+          decision.entries.length === 1 ? cityContext(decision.entries[0]) : {};
+        await notifySnaps([userSnap], {
+          ...payload,
+          threadId: single.threadId,
+          data: { ...(payload.data ?? {}), ...(single.data ?? {}), type: meta.type, variant: meta.variant },
+        });
+        await recordSent(userSnap, meta, todayDate);
+      }
       await recordReminder(userSnap, { date: todayDate, sent: sentToday + 1 });
     }),
   );
+}
+
+/** The same city context event pushes carry (notify.withGroupData). */
+function cityContext(e: NudgeEntry): { threadId: string; data: Record<string, string> } {
+  return { threadId: e.groupId, data: { group_id: e.groupId, group_name: e.cityName } };
+}
+
+/**
+ * Label a reminder push for the ledger and for `data.variant`: which slot,
+ * which kind, and whether it was the last-call chaser — so push opens can be
+ * compared the same way widget taps are.
+ */
+export function reminderMeta(entries: NudgeEntry[]): NoticeMeta {
+  const base = { type: "reminder", category: "reminder" as const, priority: "normal" as const };
+  if (entries.length === 1) {
+    const e = entries[0];
+    return { ...base, variant: `reminder.${e.nudge.slot}.${e.nudge.kind}${e.role === "done" ? ".chaser" : ""}` };
+  }
+  const rank = { meteor: 3, streak: 2, reminder: 1 } as const;
+  const worst = entries.reduce((a, b) => (rank[b.nudge.kind] > rank[a.nudge.kind] ? b : a));
+  return { ...base, variant: `reminder.multi.${worst.nudge.kind}` };
 }
 
 /** Persist what this person was sent today (`users/{uid}.reminders`). Best-effort. */

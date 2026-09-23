@@ -66,3 +66,12 @@ describe("isValidPushToken", () => {
     expect(isValidPushToken("x".repeat(5000))).toBe(false);
   });
 });
+
+describe("apsFor — quiet delivery", () => {
+  it("drops the sound and marks the push passive in quiet hours", () => {
+    const aps = apsFor({ title: "t", body: "b", quiet: true }) as Record<string, unknown>;
+    expect(aps.sound).toBeUndefined();
+    expect(aps["interruption-level"]).toBe("passive");
+    expect((apsFor({ title: "t", body: "b" }) as Record<string, unknown>).sound).toBe("default");
+  });
+});

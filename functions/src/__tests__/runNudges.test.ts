@@ -86,6 +86,8 @@ jest.mock("../push", () => ({
 import { runNudges } from "../scheduled";
 import { messageFor } from "../nudgeMessages";
 import { touchLastSeen, COMPLETION_MINUTES_KEPT } from "../presence";
+import { deliverNotice, notifyAllMembers } from "../notify";
+import { cityGrewNotice, kudosNotice } from "../eventMessages";
 import { sendPush } from "../push";
 
 const fs = jest.requireMock("firebase-admin/firestore") as {
@@ -142,8 +144,15 @@ describe("runNudges — a dormant solo owner", () => {
     expect(first).toHaveLength(1);
     expect(first[0].title).toBe("👋 We'll stop reminding you");
     expect(first[0].body).toContain("Your city Bitty Philly will be waiting");
-    expect(first[0].data).toEqual({ group_id: "Bitty Philly" });
+    expect(first[0].data).toEqual({
+      group_id: "Bitty Philly",
+      group_name: "Bitty Philly",
+      type: "farewell",
+      variant: "farewell.v1",
+    });
 
+    // Recorded on the shared notice ledger as well as the reminder state.
+    expect((user("u-nick").notices as { counts: Record<string, number> }).counts).toEqual({ reminder: 1 });
     const rem = user("u-nick").reminders as Record<string, unknown>;
     expect(rem.date).toBe(TODAY);
     expect(rem.sent).toBe(1);
@@ -239,7 +248,12 @@ describe("runNudges — active and unknown-presence members are untouched", () =
     expect(p.title).toBe(expected.title);
     expect(p.body).toBe(expected.body);
     expect(p.body).toContain("Finish today and your Cottage lands tonight.");
-    expect(p.data).toEqual({ group_id: "Scope Creep" });
+    expect(p.data).toEqual({
+      group_id: "Scope Creep",
+      group_name: "Scope Creep",
+      type: "reminder",
+      variant: "reminder.evening.streak",
+    });
   });
 
   it("treats a member with no presence stamp as active rather than farewelling them", async () => {
@@ -300,5 +314,52 @@ describe("touchLastSeen", () => {
   it("creates the doc for a user who has none yet", async () => {
     await touchLastSeen("u-new", { now: EVENING });
     expect(fs.__store.has("users/u-new")).toBe(true);
+  });
+});
+
+describe("deliverNotice — every event push goes through the policy", () => {
+  const grew = cityGrewNotice("Riverside", "Cottage", false);
+  const NY = { timezone: "America/New_York" };
+
+  it("sends to an active person with type and variant, and records it", async () => {
+    seedUser("u-a", { last_seen_at: daysBefore(EVENING, 0) });
+    expect(await deliverNotice(["u-a"], grew, { ...NY, now: EVENING })).toEqual(["u-a"]);
+    const [p] = pushesTo("tok-u-a") as Array<{ data: Record<string, string>; quiet?: boolean }>;
+    expect(p.data).toMatchObject({ type: "city_grew", variant: "city_grew.v1" });
+    expect(p.quiet).toBe(false);
+    expect(user("u-a").notices).toEqual({ date: TODAY, counts: { crew: 1 }, keys: {} });
+  });
+
+  it("keeps the dormant promise for crew news, but lets a friend's kudos through", async () => {
+    seedUser("u-d", { last_seen_at: daysBefore(EVENING, 30) });
+    expect(await deliverNotice(["u-d"], grew, { ...NY, now: EVENING })).toEqual([]);
+    expect(pushesTo("tok-u-d")).toHaveLength(0);
+    expect(await deliverNotice(["u-d"], kudosNotice("Amit"), { ...NY, now: EVENING })).toEqual(["u-d"]);
+  });
+
+  it("delivers quietly after 22:00 in the city's clock", async () => {
+    seedUser("u-q", { last_seen_at: daysBefore(EVENING, 0) });
+    await deliverNotice(["u-q"], grew, { ...NY, now: new Date("2026-09-23T03:00:00Z") }); // 23:00 in NY
+    const [p] = pushesTo("tok-u-q") as Array<{ quiet?: boolean }>;
+    expect(p.quiet).toBe(true);
+  });
+
+  it("sends a once-only notice once", async () => {
+    seedUser("u-o", { last_seen_at: daysBefore(EVENING, 0) });
+    const once = { ...grew, meta: { ...grew.meta, dedupeKey: "quest:x:announce" } };
+    await deliverNotice(["u-o"], once, { ...NY, now: EVENING });
+    await deliverNotice(["u-o"], once, { ...NY, now: EVENING });
+    expect(pushesTo("tok-u-o")).toHaveLength(1);
+  });
+
+  it("notifyAllMembers stacks by city and carries the city context", async () => {
+    seedGroup("Riverside", { group_members: ["Amit", "Jen"], member_uids: ["u-amit", "u-jen"] });
+    seedUser("u-amit", { last_seen_at: daysBefore(new Date(), 0) });
+    seedUser("u-jen", { last_seen_at: daysBefore(new Date(), 0) });
+    const got = await notifyAllMembers("Riverside", group("Riverside"), grew, "Amit");
+    expect(got).toEqual(["u-jen"]);
+    const [p] = pushesTo("tok-u-jen") as Array<{ threadId?: string; data: Record<string, string> }>;
+    expect(p.threadId).toBe("Riverside");
+    expect(p.data).toMatchObject({ group_id: "Riverside", group_name: "Riverside", type: "city_grew" });
   });
 });

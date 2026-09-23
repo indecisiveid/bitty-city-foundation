@@ -13,6 +13,7 @@ import { getProcessingDate } from "./gameLogic";
 import { memberNameForUid } from "./groupHandlers";
 import { applyKudos, KudosState } from "./kudos";
 import { notifyMembers } from "./notify";
+import { kudosNotice } from "./eventMessages";
 import { requireAuth } from "./auth";
 import { pausedMembersOn, rosterOf } from "./pauses";
 
@@ -83,11 +84,7 @@ export const sendKudos = onCall({ enforceAppCheck: true }, async (request) => {
   // Push the recipient — best-effort, after the write, and only when this
   // call is the one that recorded the kudo (a re-tap stays silent).
   if (isNew && finalData) {
-    await notifyMembers(group_id, finalData, [to_member], {
-      title: "❤️ Kudos!",
-      body: `${fromName} sent you kudos!`,
-      data: { type: "kudos", from: fromName },
-    });
+    await notifyMembers(group_id, finalData, [to_member], kudosNotice(fromName));
   }
 
   return { success: true, is_new: isNew, kudos_today: kudosState };

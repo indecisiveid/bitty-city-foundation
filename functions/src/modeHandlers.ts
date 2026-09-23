@@ -23,6 +23,7 @@ import { activeMembersOn, rosterOf } from "./pauses";
 import { GameMode, isGameMode, normalizeGameMode } from "./gameMode";
 import { modeChangedMessage } from "./crewMessages";
 import { notifyAllMembers } from "./notify";
+import { notice } from "./eventMessages";
 import { groupToResponse } from "./utils";
 import { requireAuth } from "./auth";
 
@@ -94,7 +95,12 @@ export const setGameMode = onCall({ enforceAppCheck: true }, async (request) => 
     await notifyAllMembers(
       group_id,
       after,
-      modeChangedMessage(callerName, after.group_name ?? "your city", mode, activeCount),
+      notice(modeChangedMessage(callerName, after.group_name ?? "your city", mode, activeCount), {
+        type: "mode_changed",
+        category: "crew",
+        priority: "normal",
+        variant: `mode_changed.${mode}.v1`,
+      }),
       callerName,
     );
   }

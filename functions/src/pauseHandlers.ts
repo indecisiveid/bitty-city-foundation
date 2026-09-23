@@ -39,6 +39,10 @@ import {
   onVacationMessage,
 } from "./crewMessages";
 import { notifyAllMembers } from "./notify";
+import { notice } from "./eventMessages";
+import { NoticeMeta } from "./notices";
+
+const pauseMeta = (type: string): NoticeMeta => ({ type, category: "crew", priority: "normal", variant: `${type}.v1` });
 import { groupToResponse } from "./utils";
 import { requireAuth } from "./auth";
 
@@ -127,11 +131,11 @@ export const setMemberPause = onCall({ enforceAppCheck: true }, async (request) 
     await notifyAllMembers(
       group_id,
       after,
-      onVacationMessage(targetName, cityName, dayLabel(range!.until), activeCount),
+      notice(onVacationMessage(targetName, cityName, dayLabel(range!.until), activeCount), pauseMeta("member_paused")),
       callerName,
     );
   } else if (wasPaused && !nowPaused) {
-    await notifyAllMembers(group_id, after, backMessage(targetName, cityName, activeCount), callerName);
+    await notifyAllMembers(group_id, after, notice(backMessage(targetName, cityName, activeCount), pauseMeta("member_back")), callerName);
   }
 
   return groupToResponse(group_id, after);
@@ -162,14 +166,14 @@ export const setCityPause = onCall({ enforceAppCheck: true }, async (request) =>
     await notifyAllMembers(
       group_id,
       after,
-      cityPausedMessage(cityName, callerName, dayLabel(range!.until)),
+      notice(cityPausedMessage(cityName, callerName, dayLabel(range!.until)), pauseMeta("city_paused")),
       callerName,
     );
   } else if (wasPaused && !nowPaused) {
     await notifyAllMembers(
       group_id,
       after,
-      cityResumedMessage(cityName, callerName, memberCount),
+      notice(cityResumedMessage(cityName, callerName, memberCount), pauseMeta("city_resumed")),
       callerName,
     );
   }
