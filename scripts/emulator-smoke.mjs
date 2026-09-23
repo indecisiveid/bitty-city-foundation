@@ -1275,6 +1275,72 @@ async function main() {
   check('reminders: …and its owner was sent nothing', eveDoc.body?.fields?.reminders === undefined, JSON.stringify(eveDoc.body?.fields?.reminders));
   await call('deleteGroup', { group_id: quietCity.group_id }, eve);
 
+
+  console.log('— quests —');
+  // Off by default: a tick with no config offers nothing.
+  const Q_qCity = (await call(
+    'createGroup',
+    { group_name: 'Quest Town', member: 'Christian', daily_goal: 'Walk', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  )).result;
+  await call('demoSetBuildings', { group_id: Q_qCity.group_id, count: 1 }, dev);
+  await fireSchedule();
+  let Q_qDoc = (await readDoc(`groups/${Q_qCity.group_id}`, ADMIN)).body?.fields ?? {};
+  check('quests: off by default — no quest offered', !Q_qDoc.quest || Q_qDoc.quest.nullValue === null, JSON.stringify(Q_qDoc.quest));
+
+  // Switched on: a solo city with a building rolls the invite quest.
+  await adminPatch('config/quests', { enabled: { booleanValue: true } }, ['enabled']);
+  // The config is cached per instance for a minute; the demo control ignores it,
+  // so the real roll is exercised by clearing the day's roll marker and
+  // waiting out the cache in the tick below.
+  await new Promise((r) => setTimeout(r, 61_000));
+  await fireSchedule();
+  Q_qDoc = (await readDoc(`groups/${Q_qCity.group_id}`, ADMIN)).body?.fields ?? {};
+  const Q_qf = Q_qDoc.quest?.mapValue?.fields ?? {};
+  check('quests: a solo city rolls the invite quest', Q_qf.id?.stringValue === 'invite_bonus', JSON.stringify(Q_qf.id));
+  check('quests: the card words are on the quest', typeof Q_qf.display?.mapValue?.fields?.objective?.stringValue === 'string');
+  const Q_reward = Q_qf.reward?.mapValue?.fields?.build?.stringValue;
+  check('quests: invite reward is the next tier (Medium) building', ['apartment_e', 'apartment_f', 'apartment_c', 'apartment_d'].includes(Q_reward), Q_reward);
+  const Q_devNotices = (await readDoc(`users/${dev.uid}`, ADMIN)).body?.fields?.notices?.mapValue?.fields ?? {};
+  check('quests: the offer went through the notice ledger', Q_devNotices.counts?.mapValue?.fields?.quest?.integerValue === '1', JSON.stringify(Q_devNotices));
+
+  // A friend joins → step 1, and the crew is told.
+  const Q_qJoined = (await call('joinGroup', { group_code: Q_qCity.group_code, member: 'Bob' }, bob)).result;
+  check('quests: a friend joining moves the invite quest', Q_qJoined?.quest?.progress?.step === 1 && Q_qJoined?.quest?.progress?.joined === 'Bob', JSON.stringify(Q_qJoined?.quest?.progress));
+  const qBuiltBefore = Object.values(Q_qJoined.city_map).flat().filter((c) => c && c !== 'rubble').length;
+  // A day together → complete, the building placed, bricks paid to both.
+  const qBricksBefore = Number((await readDoc(`users/${bob.uid}`, ADMIN)).body?.fields?.bricks?.integerValue ?? 0);
+  await call('completeGoal', { group_id: Q_qCity.group_id }, dev);
+  const Q_qDone = (await call('completeGoal', { group_id: Q_qCity.group_id }, bob)).result;
+  check('quests: a day together completes the invite quest', Q_qDone?.quest?.status === 'completed', JSON.stringify(Q_qDone?.quest?.status));
+  const qBuiltAfter = Object.values(Q_qDone.city_map).flat().filter((c) => c && c !== 'rubble').length;
+  check('quests: the reward building is in the city', qBuiltAfter === qBuiltBefore + 1 && Q_qDone.quest.granted?.build === Q_reward, `${qBuiltBefore}→${qBuiltAfter} ${JSON.stringify(Q_qDone.quest.granted)}`);
+  const qBricksAfter = Number((await readDoc(`users/${bob.uid}`, ADMIN)).body?.fields?.bricks?.integerValue ?? 0);
+  check('quests: 100 bricks each', qBricksAfter === qBricksBefore + 100, `${qBricksBefore}→${qBricksAfter}`);
+  await call('completeGoal', { group_id: Q_qCity.group_id }, bob);
+  const qBricksAgain = Number((await readDoc(`users/${bob.uid}`, ADMIN)).body?.fields?.bricks?.integerValue ?? 0);
+  check('quests: bricks are paid once', qBricksAgain === qBricksAfter, `${qBricksAfter}→${qBricksAgain}`);
+
+  // Material Sale: a limited-time peek at a locked tier, at the Q_sale price.
+  const Q_sale = (await call('createGroup', { group_name: 'Sale Town', member: 'Christian', daily_goal: 'Walk', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' }, dev)).result;
+  await call('demoSetBuildings', { group_id: Q_sale.group_id, count: 4 }, dev);
+  const Q_lockedTry = await call('selectBuild', { group_id: Q_sale.group_id, type: 'apartment_c' }, dev);
+  check('quests: Medium is locked at 4 buildings without a sale', Q_lockedTry.error === 'FAILED_PRECONDITION', JSON.stringify(Q_lockedTry));
+  const Q_offeredSale = (await call('demoOfferQuest', { group_id: Q_sale.group_id, quest_id: 'material_sale' }, dev)).result;
+  check('quests: the sale peeks the next tier at 2 days', Q_offeredSale?.quest?.peek?.tier === 'medium' && Q_offeredSale.quest.peek.days === 2, JSON.stringify(Q_offeredSale?.quest?.peek));
+  const Q_saleBuild = (await call('selectBuild', { group_id: Q_sale.group_id, type: 'apartment_c' }, dev)).result;
+  check('quests: a sale build starts despite the lock, at the sale price, tagged', Q_saleBuild?.current_build?.days_required === 2 && Q_saleBuild.current_build.quest === Q_offeredSale.quest.key, JSON.stringify(Q_saleBuild?.current_build));
+  check('quests: the sale moves to "under way"', Q_saleBuild?.quest?.progress?.step === 1, JSON.stringify(Q_saleBuild?.quest?.progress));
+  const Q_byBob = await call('demoOfferQuest', { group_id: Q_sale.group_id, quest_id: 'promotion' }, bob);
+  check('quests: demoOfferQuest is allowlisted', Q_byBob.error === 'PERMISSION_DENIED', JSON.stringify(Q_byBob));
+
+  // Dismiss hides it for the caller only.
+  const Q_dismissed = (await call('dismissQuest', { group_id: Q_sale.group_id }, dev)).result;
+  check('quests: dismiss records the member', (Q_dismissed?.quest?.dismissed_by ?? []).includes(dev.uid), JSON.stringify(Q_dismissed?.quest?.dismissed_by));
+  await adminPatch('config/quests', { enabled: { booleanValue: false } }, ['enabled']);
+  await call('deleteGroup', { group_id: Q_qCity.group_id }, dev);
+  await call('deleteGroup', { group_id: Q_sale.group_id }, dev);
+
   console.log('— profile upsert —');
   const upsert = await call('upsertProfile', { display_name: '  Chrisso  ' }, dev);
   check('upsertProfile trims + returns', upsert.result?.display_name === 'Chrisso', JSON.stringify(upsert));

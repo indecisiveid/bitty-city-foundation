@@ -61,6 +61,8 @@ import { idleDaysFor } from "./presence";
 import { activeMembersOn, isDayPaused, rosterOf } from "./pauses";
 import { normalizeGameMode } from "./gameMode";
 import { dueForDayProcessing, maybeProcessDay } from "./groupHandlers";
+import { runQuests } from "./questRunner";
+import { questReminderClause } from "./questMessages";
 
 // Re-exported: the copy moved to nudgeMessages.ts, callers and tests did not.
 export { messageFor } from "./nudgeMessages";
@@ -183,6 +185,7 @@ export async function runNudges(now: Date = new Date()): Promise<void> {
         // Completion order, so "Amit already checked in" names the first one in.
         completedNames: completions,
         landsToday: landingTodayLabel(data.current_build),
+        questClause: questReminderClause(data.quest ?? null, todayGameDate),
       };
       const base = { groupId: doc.id, cityName, nudge, ctx, gameDate: todayGameDate };
 
@@ -311,6 +314,9 @@ export const dailyNudge = onSchedule(
   { schedule: "every 30 minutes", timeoutSeconds: 300, memory: "256MiB" },
   async () => {
     await runDayRollover();
+    // Quests after rollover (so expiry sees the settled day), before nudges
+    // (so today's reminders can mention a quest offered this tick).
+    await runQuests(new Date());
     await runNudges(new Date());
   },
 );

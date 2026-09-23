@@ -18,6 +18,8 @@ export interface MessageContext {
   completedNames?: string[];
   /** Label of the build that lands if the crew wins today (buildings.landingTodayLabel). */
   landsToday?: string | null;
+  /** A running quest's stake, already a clause: " The Material Sale ends today." */
+  questClause?: string;
 }
 
 /**
@@ -59,9 +61,9 @@ function alreadyIn(ctx: MessageContext): string {
   return `${who} already checked in. ${pending} still to go. `;
 }
 
-/** The concrete thing at stake tonight, when a build would land. */
+/** The concrete thing at stake tonight, when a build would land — and any quest. */
 function landing(ctx: MessageContext): string {
-  return ctx.landsToday ? ` Finish today and your ${ctx.landsToday} lands tonight.` : "";
+  return (ctx.landsToday ? ` Finish today and your ${ctx.landsToday} lands tonight.` : "") + (ctx.questClause ?? "");
 }
 
 /**

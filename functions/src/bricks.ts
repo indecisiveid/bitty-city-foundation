@@ -29,7 +29,7 @@ export function bricksForLanding(days: number | undefined): number {
   return BRICKS_BY_DAYS[pick];
 }
 
-export type BrickReason = "landing" | "hats" | "purchase";
+export type BrickReason = "landing" | "hats" | "purchase" | "quest";
 
 export interface BrickEntry {
   /** Idempotency key: the landing's event id, a purchase's transaction id,

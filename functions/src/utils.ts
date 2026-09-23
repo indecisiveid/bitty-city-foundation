@@ -106,6 +106,7 @@ export function groupToResponse(
     // have always played by. See gameMode.ts.
     game_mode: normalizeGameMode(data.game_mode),
     mode_suggestion: data.mode_suggestion ?? null,
+    quest: data.quest ?? null,
     created_at:
       data.created_at?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
   };

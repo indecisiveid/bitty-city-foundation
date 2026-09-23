@@ -111,6 +111,12 @@ export interface CurrentBuild {
    * restoration would land as a brand-new park.
    */
   target_park?: string;
+  /**
+   * The quest this build counts for (quests.ts), stamped when it was started
+   * during the quest. Survives a stall and a rescue like the restore markers,
+   * so a crew that saved its build still gets the reward.
+   */
+  quest?: string;
 }
 
 /** True when this build puts something back rather than adding to the city. */
@@ -146,6 +152,8 @@ export interface AbandonedBuild {
   /** Carried from a stalled restoration so a rescue still restores. */
   target_tile?: { row: number; col: number };
   target_park?: string;
+  /** Carried so a rescued quest build still completes its quest. */
+  quest?: string;
 }
 
 export interface BrokenStreak {
@@ -174,6 +182,7 @@ function lostBuildFrom(b: AbandonedBuild): LostBuild {
     days_completed: b.days_completed,
     ...(b.target_tile ? { target_tile: b.target_tile } : {}),
     ...(b.target_park ? { target_park: b.target_park } : {}),
+    ...(b.quest ? { quest: b.quest } : {}),
   };
 }
 
@@ -1116,6 +1125,7 @@ export function processEndOfDay(params: {
         // A stalled restoration stays a restoration through a rescue.
         ...(currentBuild.target_tile ? { target_tile: currentBuild.target_tile } : {}),
         ...(currentBuild.target_park ? { target_park: currentBuild.target_park } : {}),
+        ...(currentBuild.quest ? { quest: currentBuild.quest } : {}),
       };
     }
   }

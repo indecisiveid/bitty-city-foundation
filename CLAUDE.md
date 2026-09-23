@@ -32,6 +32,20 @@ functions/src/
                      date-stamped proofs_today bucket (mirrors kudos.ts)
   proofStorage.ts    Admin-SDK check that a claimed proof object really exists
                      (bucket from PROOFS_BUCKET param)
+  notices.ts         PURE — the one policy every push passes: category budgets
+                     per presence tier, dormant filter, winback cooldown,
+                     once-only keys, quiet hours (deliver silently)
+  eventMessages.ts   PURE — copy + {type, category, priority, variant} for every
+                     event push (city grew, stall, kudos, joined, …)
+  notify.ts          deliverNotice: the only path to FCM (policy → push with
+                     data.type/variant → users/{uid}.notices ledger)
+  quests.ts          PURE — quest catalog, crew signals, cadence (rollQuest),
+                     objectives, expiry, rewards (placeBonusBuilding)
+  questMessages.ts   PURE — every word a quest says (pushes, reminder clause,
+                     the card's display text written onto the quest)
+  questRunner.ts     quest I/O: config/quests, the tick (runQuests), in-tx
+                     helpers for the callables, bricks + notices after writes
+  questHandlers.ts   dismissQuest; demoOfferQuest (allowlisted dev control)
   utils.ts           validation, group code gen, shared response shape
   __tests__/         jest suite for gameLogic
 firestore.rules      groups readable by members only; users/{uid} owner-only;
@@ -59,6 +73,14 @@ on asteroids), `building_completions: string[]` (every successful day),
 (hard mode: settlement labels where someone-but-not-everyone finished),
 `mode_suggestion: {suggested_on, near_misses, dismissed_by[]} | null`,
 `created_at`.
+
+`quest` (the city's one quest: `{key, id, status, offered_on, ends_on,
+baseline, reward, peek, progress, granted, dismissed_by, display}`),
+`quest_history[]` (last 20 outcomes — cadence and cooldowns),
+`quest_rolled_on` (the game day quests were last rolled). Builds started for
+a quest carry `current_build.quest` (survives stall/rescue/repair).
+`config/quests` (server-only) overrides `DEFAULT_QUEST_CONFIG`, incl.
+`enabled` — **false until the app with the quest card ships**.
 
 `groups/{id}/days/{YYYY-MM-DD}` → `{proofs: {[name]: {status, key?, at}}}` —
 durable proof ledger, written by `completeGoal`, member-readable (the app's
@@ -99,6 +121,16 @@ stamped by getGroup/registerPushToken/completeGoal — see `presence.ts`;
   day and only the late slots; ≥14 days gets one farewell and then silence
   until they open the app. A missing stamp means unknown → active (never
   farewell on a guess); `scripts/backfill-last-seen.mjs` seeds it from Auth.
+- **Every push is a Notice** (`notices.ts`): `notifyMembers`/`notifyAllMembers`
+  take a `{…copy, meta: {type, category, priority, variant, dedupeKey?}}` and
+  go through `deliverNotice`. Add new copy to `eventMessages.ts` (or
+  `questMessages.ts`) with a fresh `variant` id; never build copy inline.
+- **Quests** are rolled on the 30-minute tick after rollover (`runQuests`),
+  one per city at a time, by crew signals (win rate, idle days, size, last
+  outcomes); advanced inside the join / selectBuild / completeGoal /
+  settlement transactions; rewards placed by `completionUpdates` (no freeze,
+  no landing bricks, no pending_event) plus quest bricks per member.
+  Emulator: `demoOfferQuest` + `config/quests.enabled` (smoke section).
 - **Day processing runs on the server clock**: the 30-minute scheduler
   (`scheduled.ts` → `runDayRollover`) settles every city whose boundary has
   passed, then decides nudges against the settled state. Callables still
@@ -145,7 +177,7 @@ cd functions && npm test          # jest (gameLogic suite)
 # pubsub is required now too — the scheduled day-rollover function is a
 # Pub/Sub trigger and is silently ignored by the emulator without it.
 firebase emulators:start --only auth,functions,firestore,storage,pubsub --project bitty-city --non-interactive
-node scripts/emulator-smoke.mjs   # 161-check end-to-end smoke (pubsub: the scheduler section)
+node scripts/emulator-smoke.mjs   # 236-check end-to-end smoke (pubsub: scheduler, reminders, quests)
 # Ports busy (another session's emulator)? Start yours from a copy of
 # firebase.json with other ports and run the smoke with
 # SMOKE_{AUTH,FUNCTIONS,FIRESTORE,STORAGE}_PORT=… set.

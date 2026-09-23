@@ -34,6 +34,8 @@ import {
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
 import { notice, cityGrewNotice, buildStalledNotice, teammateCompletedNotice, nextUpNotice, restoringNotice, buildRescuedNotice, streakRepairedNotice } from "./eventMessages";
+import { onBuildStarted, onCompletion, onJoin, onLanding, salePeekAllows, Quest } from "./quests";
+import { afterQuestCompleted, afterQuestProgress, questWrite } from "./questRunner";
 import { touchLastSeen, localMinutesOf } from "./presence";
 import { joinedMessage, leftMessage } from "./crewMessages";
 import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
@@ -344,15 +346,32 @@ export async function maybeProcessDay(
     const snap = await tx.get(groupRef);
     if (!snap.exists) return null;
     const fresh = snap.data()!;
-    const writeUpdates = dayUpdatesFor(fresh);
-    if (!writeUpdates) return { merged: fresh, writeUpdates: null };
+    let writeUpdates = dayUpdatesFor(fresh);
+    if (!writeUpdates) return { merged: fresh, writeUpdates: null, questDone: null };
+    // A quest build that landed in settlement completes its quest here.
+    let questDone: { quest: Quest; placed: string | null } | null = null;
+    const landedHere = (writeUpdates.pending_event as { type?: string } | undefined)?.type === "build_complete";
+    if (landedHere && fresh.current_build?.quest) {
+      const today = getProcessingDate(fresh.goal_reset_time, fresh.goal_reset_timezone ?? "UTC");
+      const w = questWrite(
+        onLanding(fresh.quest ?? null, fresh.current_build, today),
+        { ...fresh, ...writeUpdates },
+        today,
+        fresh.current_build.type,
+      );
+      if (w) {
+        writeUpdates = { ...writeUpdates, ...w.updates };
+        questDone = { quest: w.quest, placed: w.placed };
+      }
+    }
     tx.update(groupRef, writeUpdates);
-    return { merged: { ...fresh, ...writeUpdates }, writeUpdates };
+    return { merged: { ...fresh, ...writeUpdates }, writeUpdates, questDone };
   });
 
   if (!result) return data; // deleted underneath us
-  const { merged, writeUpdates } = result;
+  const { merged, writeUpdates, questDone } = result;
   if (!writeUpdates) return merged; // someone else settled it first
+  if (questDone) await afterQuestCompleted(groupId, merged, questDone.quest, questDone.placed);
 
   // "City grew" push: a build landed during this end-of-day pass. Whichever
   // caller triggered processing sends it; last_processed_date has advanced so
@@ -561,6 +580,7 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
 
   let finalData: FirebaseFirestore.DocumentData;
   let joinedName: string | null = null;
+  let progressedQuest: Quest | null = null;
 
   await db().runTransaction(async (tx) => {
     const [groupSnap, userSnap] = await Promise.all([
@@ -603,9 +623,19 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
       name = `${member} ${i}`;
     }
 
+    // Invite quest: a friend joining is its first step.
+    const joinedState = { ...data, group_members: [...members, name], member_uids: [...memberUids, uid] };
+    const today = getProcessingDate(data.goal_reset_time, data.goal_reset_timezone ?? "UTC");
+    const questStep = questWrite(
+      onJoin(data.quest ?? null, activeMembersOn(rosterOf(joinedState), today).length, name, today),
+      joinedState,
+      today,
+    );
+    progressedQuest = questStep?.quest ?? null;
     tx.update(groupRef, {
       group_members: [...members, name],
       member_uids: [...memberUids, uid],
+      ...(questStep?.updates ?? {}),
     });
     tx.set(
       userRef,
@@ -622,6 +652,7 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
       ...data,
       group_members: [...members, name],
       member_uids: [...memberUids, uid],
+      ...(questStep?.updates ?? {}),
     };
   });
 
@@ -642,6 +673,8 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
         { type: "member_joined", category: "crew", priority: "normal", variant: "member_joined.v1" },
       ),
     );
+    // Invite quest moved: the crew (not the friend who just joined) hears it.
+    if (progressedQuest) await afterQuestProgress(groupId, finalData, progressedQuest, joinedName);
   }
 
   return groupToResponse(groupId, finalData);
@@ -742,6 +775,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   // idempotent re-tap), so we notify teammates exactly once.
   let completedName: string | null = null;
   // The build as it stood before this call landed it (null if nothing landed).
+  let questDone: { quest: Quest; placed: string | null } | null = null;
   let landedBuild: FirebaseFirestore.DocumentData | null = null;
 
   // Now mark completion in a transaction
@@ -828,11 +862,26 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       ? { ...landing, landed_on: activityDate }
       : {};
 
+    // Quests: a quest build landing completes Promotion / the Sale; a
+    // check-in can complete the invite (two in together) or a comeback.
+    const questTransition =
+      landing && build?.quest
+        ? onLanding(freshData.quest ?? null, build, activityDate)
+        : onCompletion(freshData.quest ?? null, { completedActive, dayWon: shareNow > 0, today: activityDate });
+    const questStep = questWrite(
+      questTransition,
+      { ...freshData, ...landingUpdates },
+      activityDate,
+      landing && build ? build.type : null,
+    );
+    if (questStep?.quest.status === "completed") questDone = { quest: questStep.quest, placed: questStep.placed };
+
     tx.update(groupRef, {
       completions_today: newCompletions,
       last_activity_date: activityDate,
       proofs_today: proofsToday,
       ...landingUpdates,
+      ...(questStep?.updates ?? {}),
     });
     // Durable per-day ledger — what "See proof" on a building reads.
     tx.set(
@@ -846,6 +895,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       last_activity_date: activityDate,
       proofs_today: proofsToday,
       ...landingUpdates,
+      ...(questStep?.updates ?? {}),
     };
   });
 
@@ -853,6 +903,10 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   if (landedBuild) {
     await grantLandingBricks(group_id, finalData!, finalData!.pending_event);
   }
+
+  // Assigned inside the transaction callback, which TS can't see.
+  const done = questDone as { quest: Quest; placed: string | null } | null;
+  if (done) await afterQuestCompleted(group_id, finalData!, done.quest, done.placed);
 
   // "Teammate completed" push → nudge the crew members who still haven't
   // finished today (the pressure's on them). Best-effort, after the write.
@@ -970,7 +1024,8 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
     // same one the write is conditioned on.
     const needed = minBuildingsFor(type) ?? 0;
     const have = countBuildings(freshData.city_map, normalizeParks(freshData.parks));
-    if (have < needed) {
+    // A Material Sale quest is a limited-time peek at the next tier.
+    if (have < needed && !salePeekAllows(freshData.quest ?? null, type, today)) {
       throw new HttpsError(
         "failed-precondition",
         `${labelFor(type)} unlocks once your city has ${needed} buildings — ${needed - have} to go`,
@@ -978,15 +1033,20 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
       );
     }
 
+    // A build started during a quest that counts it is stamped with the
+    // quest (and a sale build keeps its sale price to the end).
+    const started = onBuildStarted(freshData.quest ?? null, type, today);
     const newBuild = {
       type,
-      days_required: daysFor(type)!,
+      days_required: started?.stamp.days_required ?? daysFor(type)!,
       days_completed: 0,
+      ...(started ? { quest: started.stamp.quest } : {}),
     };
+    const questStep = questWrite(started?.transition ?? null, freshData, today);
 
     // Choosing a new build gives up any stalled one still on offer.
-    tx.update(groupRef, { current_build: newBuild, abandoned_build: null });
-    finalData = { ...freshData, current_build: newBuild, abandoned_build: null };
+    tx.update(groupRef, { current_build: newBuild, abandoned_build: null, ...(questStep?.updates ?? {}) });
+    finalData = { ...freshData, current_build: newBuild, abandoned_build: null, ...(questStep?.updates ?? {}) };
     pickerName = member;
   });
 
