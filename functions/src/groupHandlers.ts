@@ -355,8 +355,8 @@ export async function maybeProcessDay(
       title: `🚧 ${label} stalled`,
       body:
         mode === "hard"
-          ? `${why} No freezes left. Switch to easy mode today to save it.`
-          : `${why} No freezes left. Pick a new build.`,
+          ? `${why} No hard hats left. Switch to easy mode today to save it.`
+          : `${why} No hard hats left. Pick a new build.`,
     });
   }
 
@@ -1215,7 +1215,7 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
     if (!rescued) {
       throw new HttpsError(
         "failed-precondition",
-        "There's no stalled build to rescue, or no streak freeze to spend",
+        "There's no stalled build to rescue, or no hard hat to use",
       );
     }
 
@@ -1231,8 +1231,8 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
       group_id,
       finalData!,
       {
-        title: `🧊 The ${label} build is back on`,
-        body: `${rescuerName} spent a streak freeze to save it. Finish today's goal to keep it moving.`,
+        title: `🪖 The ${label} build is back on`,
+        body: `${rescuerName} used a hard hat to save it. Finish today's goal to keep it moving.`,
       },
       rescuerName,
     );
@@ -1343,8 +1343,8 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
       {
         title: `🧊 ${restoredValue}-day streak repaired`,
         body: label
-          ? `${repairerName} spent a streak freeze to bring back your streak and your ${label} build. Finish today's goal to keep it moving.`
-          : `${repairerName} spent a streak freeze to bring back your streak.`,
+          ? `${repairerName} used a hard hat to bring back your streak and your ${label} build. Finish today's goal to keep it moving.`
+          : `${repairerName} used a hard hat to bring back your streak.`,
       },
       repairerName,
     );
@@ -1355,7 +1355,7 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
 
 const REPAIR_BLOCKER_MESSAGES: Record<StreakRepairBlocker, string> = {
   nothing_to_repair: "There's no recently broken streak to repair",
-  no_freeze: "Repairing a streak costs a streak freeze — land a building to earn one",
+  no_freeze: "Repairing a streak takes a hard hat — land a building to earn one",
   build_in_progress: "Finish the current build first — the repair brings your lost build back",
   landed_today: "Your city grew today — repair it tomorrow",
 };
