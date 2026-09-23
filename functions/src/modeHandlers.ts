@@ -17,7 +17,7 @@
  */
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { getProcessingDate } from "./gameLogic";
+import { applyBuildRescue, getProcessingDate } from "./gameLogic";
 import { memberNameForUid, maybeProcessDay } from "./groupHandlers";
 import { activeMembersOn, rosterOf } from "./pauses";
 import { GameMode, isGameMode, normalizeGameMode } from "./gameMode";
@@ -40,7 +40,7 @@ async function loadSettled(group_id: string) {
 
 export const setGameMode = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
-  const { group_id, mode } = request.data ?? {};
+  const { group_id, mode, rescue_build } = request.data ?? {};
   if (!group_id) throw new HttpsError("invalid-argument", "group_id is required");
   if (!isGameMode(mode)) {
     throw new HttpsError("invalid-argument", "mode must be 'easy' or 'hard'");
@@ -56,7 +56,36 @@ export const setGameMode = onCall({ enforceAppCheck: true }, async (request) => 
   }
 
   // A switch answers the suggestion either way, so it stops re-opening.
-  const updates = { game_mode: mode, game_mode_set_by: uid, mode_suggestion: null };
+  const updates: Record<string, unknown> = {
+    game_mode: mode,
+    game_mode_set_by: uid,
+    mode_suggestion: null,
+  };
+
+  // "Switch to easy mode and save it": a hard-mode crew that stalled a build
+  // with no freeze left can take the gentler rules instead of a freeze. The
+  // near miss that stalled it is exactly the day easy mode would have
+  // banked, so the switch is the honest price — the build comes back where
+  // it stopped and the missed day is bridged, with no freeze spent. Only
+  // on the way DOWN to easy; requested explicitly so a plain mode change
+  // never quietly resurrects a build the crew meant to drop.
+  if (rescue_build === true && mode === "easy" && before === "hard") {
+    const rescued = applyBuildRescue({
+      abandonedBuild: data.abandoned_build ?? null,
+      currentBuild: data.current_build ?? null,
+      streakFreezes: data.streak_freezes ?? 0,
+      frozenDates: data.frozen_dates ?? [],
+      brokenStreak: data.broken_streak ?? null,
+      todayStr: today,
+      spendFreeze: false,
+      event: { by: callerName, mode: before, ledger: data.freeze_ledger ?? [] },
+    });
+    if (!rescued) {
+      throw new HttpsError("failed-precondition", "There's no stalled build to save");
+    }
+    Object.assign(updates, rescued);
+  }
+
   await groupRef.update(updates);
   const after: FirebaseFirestore.DocumentData = { ...data, ...updates };
 

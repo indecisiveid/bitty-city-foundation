@@ -177,6 +177,59 @@ function lostBuildFrom(b: AbandonedBuild): LostBuild {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Freeze events — why the freeze count changed
+//
+// `frozen_dates` is the streak's bridge and says nothing about WHY a label
+// was frozen. Every spend now also writes one of these, so the app can tell
+// the crew what happened ("a freeze covered Sam and Alex yesterday") instead
+// of letting the count drop in silence. `last_freeze_event` is the one the
+// app surfaces on the next open; `freeze_ledger` is the trailing history the
+// freeze sheet lists. Spends only: earning is visible enough as it happens
+// (the count goes up when a building lands).
+//
+//   auto    settlement spent one without anyone tapping (the normal path)
+//   rescue  a member spent one on a stalled build (legacy offers only —
+//           settlement now rescues on its own when a freeze is in stock)
+//   repair  a member spent one on a broken streak
+//   switch  the crew switched to easy mode to save a stalled build; no
+//           freeze was spent, but the missed day was still bridged
+// ---------------------------------------------------------------------------
+
+export type FreezeEventKind = "auto" | "rescue" | "repair" | "switch";
+
+export interface FreezeEvent {
+  /** Settlement label of the (first) day the freeze covered. */
+  date: string;
+  kind: FreezeEventKind;
+  /** The mode the day was scored under — what a "miss" meant. */
+  mode: GameMode;
+  /**
+   * Active members who did not complete that day, by display name (the
+   * same names `completions_today` carries). In hard mode this is who the
+   * freeze paid for; in easy mode it is everyone, since nobody built. Empty
+   * when the pass could not know (a batched multi-day gap).
+   */
+  covered: string[];
+  /** Labels covered by this one event — 1 except for a batched gap. */
+  days: number;
+  /** The build the freeze kept alive, when one was in flight. */
+  build?: LostBuild;
+  /** Freezes left after this event. */
+  remaining: number;
+  /** Who tapped, for rescue / repair / switch. */
+  by?: string;
+  at: string;
+}
+
+/** How much history the group doc keeps. Enough for the freeze sheet's
+ *  "Recent" list and a month of support questions; not a full audit log. */
+export const FREEZE_LEDGER_MAX = 20;
+
+export function appendFreezeEvent(ledger: FreezeEvent[] | null | undefined, event: FreezeEvent): FreezeEvent[] {
+  return [...(ledger ?? []), event].slice(-FREEZE_LEDGER_MAX);
+}
+
 export interface GroupDoc {
   group_id: string;
   group_code: string;
@@ -192,6 +245,10 @@ export interface GroupDoc {
   streak_freezes?: number;
   frozen_dates?: string[];
   broken_streak?: BrokenStreak | null;
+  /** The most recent freeze spend, for the app to announce. See FreezeEvent. */
+  last_freeze_event?: FreezeEvent | null;
+  /** Trailing spend history, newest last, capped at FREEZE_LEDGER_MAX. */
+  freeze_ledger?: FreezeEvent[];
   last_activity_date?: string | null;
   last_inactivity_meteor_date?: string | null;
   current_build: CurrentBuild | null;
@@ -252,6 +309,9 @@ export interface EndOfDayUpdates {
   frozen_dates?: string[];
   paused_dates?: string[];
   broken_streak?: BrokenStreak | null;
+  /** Written when this pass spent a freeze. */
+  last_freeze_event?: FreezeEvent;
+  freeze_ledger?: FreezeEvent[];
   /** Written when the near-miss ledger changed (hard mode). */
   near_miss_dates?: string[];
   /** Written only when a pause parks the inactivity clock — see the
@@ -859,6 +919,8 @@ export function processEndOfDay(params: {
    *  before the feature behaves exactly as it did. */
   gameMode?: GameMode;
   nearMissDates?: string[];
+  /** Spend history to append to. Absent on docs that predate it. */
+  freezeLedger?: FreezeEvent[];
 }): EndOfDayUpdates {
   const {
     groupMembers,
@@ -884,10 +946,19 @@ export function processEndOfDay(params: {
     pausedDates = [],
     gameMode = "hard",
     nearMissDates = [],
+    freezeLedger = [],
   } = params;
 
   const updates: EndOfDayUpdates = {
     completions_today: [],
+  };
+  // Every freeze this pass spends goes through here, so the doc always
+  // carries the newest event and the capped history together.
+  let ledger = freezeLedger;
+  const recordFreeze = (event: FreezeEvent) => {
+    ledger = appendFreezeEvent(ledger, event);
+    updates.last_freeze_event = event;
+    updates.freeze_ledger = ledger;
   };
   const parks: Park[] = parksIn ?? [];
 
@@ -980,6 +1051,9 @@ export function processEndOfDay(params: {
       daysBetween(lastInactivityMeteorDate, processingDate) >= INACTIVITY_METEOR_DAYS);
 
   // --- Build progression / standard asteroid ---
+  // Set when the day just settled stalled the build; resolved after the
+  // freeze accounting, which decides whether the build survives in place.
+  let stalledBuild: AbandonedBuild | null = null;
   if (currentBuild !== null) {
     if (daySuccessful) {
       // Snapped, so three thirds land as exactly one day (see gameMode.ts).
@@ -1028,10 +1102,11 @@ export function processEndOfDay(params: {
       // and the meteor (below) does the talking. No rescue offer.
       updates.current_build = null;
     } else {
-      // Missed a day of the build. The city is NOT damaged — the build is
-      // lifted into `abandoned_build`, rescuable with a freeze for one day.
-      updates.current_build = null;
-      updates.abandoned_build = {
+      // Missed a day of the build. The city is NOT damaged. What happens to
+      // the build is decided below, once the freeze stock is known: a freeze
+      // in stock keeps it exactly where it is; none lifts it into
+      // `abandoned_build`, where it stays resumable for one day.
+      stalledBuild = {
         type: currentBuild.type,
         days_required: currentBuild.days_required,
         days_completed: currentBuild.days_completed,
@@ -1045,13 +1120,10 @@ export function processEndOfDay(params: {
 
   // An older rescue offer has outlived its window (it was only good for the
   // single day after `abandoned_on`, and we are now settling a later day).
-  if (
-    updates.abandoned_build === undefined &&
-    abandonedBuild &&
-    abandonedBuild.abandoned_on !== processingDate
-  ) {
-    updates.abandoned_build = null;
-  }
+  // The write itself lands with the stall decision below; the flag feeds the
+  // break record in the meantime.
+  const offerExpired =
+    !stalledBuild && !!abandonedBuild && abandonedBuild.abandoned_on !== processingDate;
 
   // --- Log the successful day (landing or not) ---
   if (daySuccessful && !newCompletions.includes(processingDate)) {
@@ -1170,6 +1242,18 @@ export function processEndOfDay(params: {
               if (!newFrozen.includes(ds)) newFrozen.push(ds);
             }
             freezes -= missed.length;
+            // A batched gap: the pass can't know who missed which day, so
+            // the event names nobody. The scheduler settles daily, so this
+            // is the exception; the same-day block below is the rule.
+            recordFreeze({
+              date: formatYmd(missed[0]),
+              kind: "auto",
+              mode: gameMode,
+              covered: [],
+              days: missed.length,
+              remaining: freezes,
+              at: nowIso,
+            });
           } else {
             // Not enough freezes — the streak breaks, but keep a repairable
             // record. Don't burn a partial stock that can't save the chain.
@@ -1182,9 +1266,7 @@ export function processEndOfDay(params: {
               // The build this miss cost: stalled in this very pass (a
               // batched absence), or the rescue offer expiring in it (the
               // usual case — the break is charged one pass after the stall).
-              const lostSource =
-                updates.abandoned_build ??
-                (updates.abandoned_build === null ? abandonedBuild : null);
+              const lostSource = stalledBuild ?? (offerExpired ? abandonedBuild : null);
               broken = {
                 value: preStreak,
                 broken_on: formatYmd(brokenOnDay),
@@ -1196,6 +1278,55 @@ export function processEndOfDay(params: {
         }
       }
     }
+  }
+
+  // --- Same-day freeze: the day just settled was missed with a live chain ---
+  // Used automatically, and visibly. Before this block a missed label was
+  // only charged on the NEXT pass (the gap block above), which left a day in
+  // which the crew held a stalled build and a freeze that would be spent on
+  // that miss no matter what they tapped — so the rescue sheet's "let it go"
+  // was a choice with no difference. Now the freeze goes on the day it is
+  // owed: the label is bridged, the build (if any) stays exactly where it
+  // is, and the event says who it covered. Nothing here advances a build.
+  //
+  // Runs after the gap block on purpose: a batched absence settles its
+  // earlier days first, all or nothing, and this block only spends what is
+  // left. A chain that just broke has nothing to protect.
+  let coveredToday = false;
+  const missedToday = !isGraceDay && !dayPaused && !daySuccessful && !meteorDue;
+  if (missedToday && broken === null && freezes >= 1 && !newFrozen.includes(processingDate)) {
+    const chainAlive =
+      computeStreakWithFreezes(
+        newCompletions,
+        bridgeDates(newFrozen, newPaused),
+        addDays(processingDate, -1),
+      ) > 0;
+    if (chainAlive) {
+      newFrozen.push(processingDate);
+      freezes -= 1;
+      coveredToday = true;
+      recordFreeze({
+        date: processingDate,
+        kind: "auto",
+        mode: gameMode,
+        covered: activeMembers.filter((m) => !completionsSet.has(m)),
+        days: 1,
+        ...(stalledBuild ? { build: lostBuildFrom(stalledBuild) } : {}),
+        remaining: freezes,
+        at: nowIso,
+      });
+    }
+  }
+
+  // --- Stall resolution ---
+  // Covered: the build survives untouched (no write). Not covered: it is
+  // parked for the one-day rescue window, exactly as before.
+  if (stalledBuild && !coveredToday) {
+    updates.current_build = null;
+    updates.abandoned_build = stalledBuild;
+  }
+  if (offerExpired) {
+    updates.abandoned_build = null;
   }
 
   // Single source of truth for streak: derive from the (possibly
@@ -1268,32 +1399,64 @@ export function applyBuildRescue(params: {
    *  empty list. */
   frozenDates?: string[];
   todayStr: string;
+  /**
+   * False for the "switch to easy mode and save it" path: the missed day is
+   * still bridged and the build still comes back, but no freeze is spent —
+   * the crew paid by changing the rules it plays under. Default true.
+   */
+  spendFreeze?: boolean;
+  /** For the ledger. Absent in older callers and tests: no event is written. */
+  event?: { by: string; mode: GameMode; ledger: FreezeEvent[] | null | undefined; at?: string };
 }): {
   current_build: CurrentBuild;
   abandoned_build: null;
   streak_freezes: number;
   frozen_dates: string[];
   broken_streak?: BrokenStreak;
+  last_freeze_event?: FreezeEvent;
+  freeze_ledger?: FreezeEvent[];
 } | null {
-  const { abandonedBuild, currentBuild, streakFreezes, frozenDates = [], todayStr, brokenStreak } = params;
+  const {
+    abandonedBuild,
+    currentBuild,
+    streakFreezes,
+    frozenDates = [],
+    todayStr,
+    brokenStreak,
+    spendFreeze = true,
+    event,
+  } = params;
   if (!isRescuableBuild(abandonedBuild, currentBuild, todayStr)) return null;
-  if (streakFreezes < 1) return null;
+  if (spendFreeze && streakFreezes < 1) return null;
 
   const missed = abandonedBuild!.abandoned_on;
   const frozen = frozenDates.includes(missed) ? [...frozenDates] : [...frozenDates, missed];
+  const remaining = spendFreeze ? streakFreezes - 1 : streakFreezes;
+  const build = lostBuildFrom(abandonedBuild!);
+
+  let ledgerFields: { last_freeze_event: FreezeEvent; freeze_ledger: FreezeEvent[] } | null = null;
+  if (event) {
+    const e: FreezeEvent = {
+      date: missed,
+      kind: spendFreeze ? "rescue" : "switch",
+      mode: event.mode,
+      covered: [],
+      days: 1,
+      build,
+      remaining,
+      by: event.by,
+      at: event.at ?? new Date().toISOString(),
+    };
+    ledgerFields = { last_freeze_event: e, freeze_ledger: appendFreezeEvent(event.ledger, e) };
+  }
 
   return {
-    current_build: {
-      type: abandonedBuild!.type,
-      days_required: abandonedBuild!.days_required,
-      days_completed: abandonedBuild!.days_completed,
-      ...(abandonedBuild!.target_tile ? { target_tile: abandonedBuild!.target_tile } : {}),
-      ...(abandonedBuild!.target_park ? { target_park: abandonedBuild!.target_park } : {}),
-    },
+    current_build: { ...build },
     abandoned_build: null,
-    streak_freezes: streakFreezes - 1,
+    streak_freezes: remaining,
     frozen_dates: frozen,
     ...(brokenStreak?.lost_build ? { broken_streak: withoutLostBuild(brokenStreak) } : {}),
+    ...(ledgerFields ?? {}),
   };
 }
 
@@ -1372,6 +1535,8 @@ export function applyStreakRepair(params: {
    * button shows no cost) is never charged silently. Streak only.
    */
   payment?: StreakRepairPayment;
+  /** For the ledger, paid repairs only. Absent in older callers and tests. */
+  event?: { by: string; mode: GameMode; ledger: FreezeEvent[] | null | undefined; at?: string };
 }): {
   frozen_dates: string[];
   streak: number;
@@ -1379,8 +1544,10 @@ export function applyStreakRepair(params: {
   streak_freezes?: number;
   current_build?: CurrentBuild;
   abandoned_build?: null;
+  last_freeze_event?: FreezeEvent;
+  freeze_ledger?: FreezeEvent[];
 } | null {
-  const { buildingCompletions, frozenDates, pausedDates = [], brokenStreak, todayStr, payment } = params;
+  const { buildingCompletions, frozenDates, pausedDates = [], brokenStreak, todayStr, payment, event } = params;
   if (!brokenStreak) return null;
   if (daysBetween(brokenStreak.broken_on, todayStr) > REPAIR_WINDOW_DAYS) {
     return null;
@@ -1415,10 +1582,27 @@ export function applyStreakRepair(params: {
   if (!payment) return repaired;
 
   const lost = brokenStreak.lost_build;
+  const remaining = payment.streakFreezes - 1;
+  let ledgerFields: { last_freeze_event: FreezeEvent; freeze_ledger: FreezeEvent[] } | null = null;
+  if (event) {
+    const e: FreezeEvent = {
+      date: brokenStreak.broken_on,
+      kind: "repair",
+      mode: event.mode,
+      covered: [],
+      days: frozen.length - frozenDates.length,
+      ...(lost ? { build: { ...lost } } : {}),
+      remaining,
+      by: event.by,
+      at: event.at ?? new Date().toISOString(),
+    };
+    ledgerFields = { last_freeze_event: e, freeze_ledger: appendFreezeEvent(event.ledger, e) };
+  }
   return {
     ...repaired,
-    streak_freezes: payment.streakFreezes - 1,
+    streak_freezes: remaining,
     // Progress exactly as it stalled — the crew picks up the day it missed.
     ...(lost ? { current_build: { ...lost }, abandoned_build: null } : {}),
+    ...(ledgerFields ?? {}),
   };
 }

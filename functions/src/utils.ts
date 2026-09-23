@@ -82,6 +82,8 @@ export function groupToResponse(
     streak_freezes: data.streak_freezes ?? 0,
     frozen_dates: data.frozen_dates ?? [],
     broken_streak: data.broken_streak ?? null,
+    last_freeze_event: data.last_freeze_event ?? null,
+    freeze_ledger: data.freeze_ledger ?? [],
     last_activity_date: data.last_activity_date ?? null,
     current_build: data.current_build ?? null,
     abandoned_build: data.abandoned_build ?? null,

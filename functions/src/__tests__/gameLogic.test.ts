@@ -21,6 +21,7 @@ import {
   findOccupiedTiles,
   rowMajorBuildOrder,
   FREEZE_CAP,
+  FREEZE_LEDGER_MAX,
   CityMap,
   countBuildings,
 } from "../gameLogic";
@@ -308,7 +309,7 @@ describe("processEndOfDay — streak freezes", () => {
     expect(updates.broken_streak).toBeNull();
   });
 
-  it("a multi-day absence consumes one freeze per gap day in one pass", () => {
+  it("a multi-day absence consumes one freeze per gap day in one pass, then one for today", () => {
     // completed 04-30, 05-01; gap 05-02 + 05-03; processing 05-04 (missed too)
     const updates = processEndOfDay(
       baseParams({
@@ -316,12 +317,17 @@ describe("processEndOfDay — streak freezes", () => {
         streakFreezes: 3,
       }),
     );
+    // The batched gap first (all or nothing), then the day just settled.
     expect(updates.frozen_dates).toEqual(
-      expect.arrayContaining(["2026-05-02", "2026-05-03"]),
+      expect.arrayContaining(["2026-05-02", "2026-05-03", "2026-05-04"]),
     );
-    expect(updates.streak_freezes).toBe(1);
-    // chain: 04-30 ✓, 05-01 ✓, 05-02 ❄, 05-03 ❄ → anchored at yesterday
+    expect(updates.streak_freezes).toBe(0);
+    // chain: 04-30 ✓, 05-01 ✓, 05-02 ❄, 05-03 ❄, 05-04 ❄ → anchored at today
     expect(updates.streak).toBe(2);
+    // Two events: the gap names nobody (the pass can't know), today does.
+    expect(updates.freeze_ledger).toHaveLength(2);
+    expect(updates.freeze_ledger?.[0]).toMatchObject({ kind: "auto", date: "2026-05-02", days: 2, covered: [] });
+    expect(updates.last_freeze_event).toMatchObject({ kind: "auto", date: TODAY, days: 1, covered: MEMBERS, remaining: 0 });
   });
 
   it("insufficient freezes break the streak and record it without burning the stock", () => {
@@ -362,7 +368,11 @@ describe("processEndOfDay — streak freezes", () => {
     expect(updates.streak).toBe(0);
   });
 
-  it("a single missed day needs no freeze yet (yesterday anchor keeps it alive)", () => {
+  it("a single missed day spends a freeze the day it is owed, and says so", () => {
+    // Used to wait for the next pass (the yesterday anchor kept the chain
+    // alive one more day). Now the label is bridged in the pass that missed
+    // it, so the crew sees the count drop with a reason instead of finding
+    // it gone a day later.
     const updates = processEndOfDay(
       baseParams({
         buildingCompletions: ["2026-05-02", "2026-05-03"],
@@ -370,7 +380,188 @@ describe("processEndOfDay — streak freezes", () => {
       }),
     );
     expect(updates.streak).toBe(2);
+    expect(updates.streak_freezes).toBe(0);
+    expect(updates.frozen_dates).toEqual([TODAY]);
+    expect(updates.last_freeze_event).toMatchObject({
+      date: TODAY,
+      kind: "auto",
+      mode: "hard",
+      covered: ["alice", "bob"],
+      days: 1,
+      remaining: 0,
+    });
+    expect(updates.last_freeze_event?.build).toBeUndefined();
+    expect(updates.freeze_ledger).toEqual([updates.last_freeze_event]);
+  });
+
+  it("with no freeze, a single missed day still rides the yesterday anchor", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        buildingCompletions: ["2026-05-02", "2026-05-03"],
+        streakFreezes: 0,
+      }),
+    );
+    expect(updates.streak).toBe(2);
+    expect(updates.frozen_dates).toEqual([]);
+    expect(updates.last_freeze_event).toBeUndefined();
+  });
+
+  it("names only the members who missed in hard mode", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        completionsToday: ["alice"],
+        buildingCompletions: ["2026-05-03"],
+        streakFreezes: 2,
+      }),
+    );
+    expect(updates.last_freeze_event).toMatchObject({ covered: ["bob"], mode: "hard", remaining: 1 });
+  });
+
+  it("in easy mode a partial day is banked, never frozen", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        gameMode: "easy",
+        completionsToday: ["alice"],
+        buildingCompletions: ["2026-05-03"],
+        streakFreezes: 2,
+      }),
+    );
+    expect(updates.streak_freezes).toBe(2);
+    expect(updates.frozen_dates).toEqual([]);
+    expect(updates.last_freeze_event).toBeUndefined();
+    expect(updates.streak).toBe(2);
+  });
+
+  it("in easy mode an empty day is frozen and the event covers everyone", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        gameMode: "easy",
+        buildingCompletions: ["2026-05-03"],
+        streakFreezes: 2,
+      }),
+    );
     expect(updates.streak_freezes).toBe(1);
+    expect(updates.last_freeze_event).toMatchObject({ mode: "easy", covered: ["alice", "bob"] });
+  });
+
+  it("does not spend a freeze on a grace day, a paused day, or when the meteor is due", () => {
+    const grace = processEndOfDay(
+      baseParams({ buildingCompletions: ["2026-05-03"], streakFreezes: 1, isGraceDay: true }),
+    );
+    expect(grace.streak_freezes).toBe(1);
+    const paused = processEndOfDay(
+      baseParams({
+        buildingCompletions: ["2026-05-03"],
+        streakFreezes: 1,
+        memberUids: ["u-alice", "u-bob"],
+        cityPause: { from: "2026-05-03", until: "2026-05-03" },
+      }),
+    );
+    expect(paused.streak_freezes).toBe(1);
+    const meteor = processEndOfDay(
+      baseParams({
+        buildingCompletions: ["2026-05-03"],
+        streakFreezes: 1,
+        lastActivityDate: "2026-04-20",
+        cityMap: mapWithHouses(5),
+      }),
+    );
+    expect(meteor.streak_freezes).toBe(1);
+    expect(meteor.pending_event?.type).toBe("asteroid");
+  });
+
+  it("caps the ledger at FREEZE_LEDGER_MAX", () => {
+    const full = Array.from({ length: FREEZE_LEDGER_MAX }, (_, i) => ({
+      date: `2026-04-${String(i + 1).padStart(2, "0")}`,
+      kind: "auto" as const,
+      mode: "hard" as const,
+      covered: [],
+      days: 1,
+      remaining: 0,
+      at: "2026-04-01T00:00:00.000Z",
+    }));
+    const updates = processEndOfDay(
+      baseParams({ buildingCompletions: ["2026-05-03"], streakFreezes: 1, freezeLedger: full }),
+    );
+    expect(updates.freeze_ledger).toHaveLength(FREEZE_LEDGER_MAX);
+    expect(updates.freeze_ledger?.[FREEZE_LEDGER_MAX - 1].date).toBe(TODAY);
+    expect(updates.freeze_ledger?.[0].date).toBe("2026-04-02");
+  });
+});
+
+describe("processEndOfDay — a stalled build with a freeze in stock", () => {
+  const build = { type: "apartment", days_required: 3, days_completed: 1 };
+
+  it("keeps the build in place and spends the freeze on the missed day", () => {
+    // The old shape held the build in `abandoned_build` and asked the crew
+    // to spend the freeze themselves — while the next pass would have spent
+    // it on the same miss regardless. Now settlement does the only sensible
+    // thing itself.
+    const updates = processEndOfDay(
+      baseParams({
+        currentBuild: build,
+        buildingCompletions: ["2026-05-02", "2026-05-03"],
+        streakFreezes: 2,
+        cityMap: mapWithHouses(5),
+      }),
+    );
+    expect(updates.current_build).toBeUndefined(); // untouched, progress intact
+    expect(updates.abandoned_build).toBeUndefined();
+    expect(updates.streak_freezes).toBe(1);
+    expect(updates.frozen_dates).toEqual([TODAY]);
+    expect(updates.streak).toBe(2);
+    expect(updates.last_freeze_event).toMatchObject({
+      kind: "auto",
+      build: { type: "apartment", days_required: 3, days_completed: 1 },
+      covered: MEMBERS,
+      remaining: 1,
+    });
+    // Nothing destroyed, no offer to weigh.
+    expect(updates.pending_event).toBeUndefined();
+    expect(updates.city_map).toBeUndefined();
+  });
+
+  it("the kept build advances normally the next day", () => {
+    const next = processEndOfDay(
+      baseParams({
+        completionsToday: MEMBERS,
+        currentBuild: build,
+        buildingCompletions: ["2026-05-02", "2026-05-03"],
+        frozenDates: [TODAY],
+        streakFreezes: 1,
+        processingDate: "2026-05-05",
+      }),
+    );
+    expect(next.current_build?.days_completed).toBe(2);
+    expect(next.streak_freezes).toBe(1); // not charged again
+    expect(next.streak).toBe(3);
+  });
+
+  it("parks the build for rescue only when there is nothing to spend", () => {
+    const updates = processEndOfDay(
+      baseParams({
+        currentBuild: build,
+        buildingCompletions: ["2026-05-02", "2026-05-03"],
+        streakFreezes: 0,
+      }),
+    );
+    expect(updates.current_build).toBeNull();
+    expect(updates.abandoned_build).toMatchObject({ ...build, abandoned_on: TODAY });
+    expect(updates.last_freeze_event).toBeUndefined();
+  });
+
+  it("does not spend a freeze to keep a build when the chain is already dead", () => {
+    // No live streak → nothing the freeze protects; the build stalls as it
+    // always did and the freeze is saved for a day it can matter.
+    const updates = processEndOfDay(
+      baseParams({
+        currentBuild: build,
+        buildingCompletions: ["2026-04-01"],
+        streakFreezes: 2,
+      }),
+    );
+    expect(updates.streak_freezes).toBe(2);
+    expect(updates.abandoned_build).toMatchObject({ abandoned_on: TODAY });
   });
 });
 
@@ -527,6 +718,46 @@ describe("isRescuableBuild / applyBuildRescue", () => {
       // The freeze covers the missed day for the streak as well.
       frozen_dates: ["2026-05-03"],
     });
+  });
+
+  it("writes a rescue event when told who tapped", () => {
+    const result = applyBuildRescue({
+      abandonedBuild: offer,
+      currentBuild: null,
+      streakFreezes: 2,
+      todayStr: TODAY,
+      event: { by: "alice", mode: "hard", ledger: [], at: "2026-05-04T08:00:00.000Z" },
+    });
+    expect(result?.last_freeze_event).toEqual({
+      date: "2026-05-03",
+      kind: "rescue",
+      mode: "hard",
+      covered: [],
+      days: 1,
+      build: { type: "skyscraper", days_required: 7, days_completed: 4 },
+      remaining: 1,
+      by: "alice",
+      at: "2026-05-04T08:00:00.000Z",
+    });
+    expect(result?.freeze_ledger).toEqual([result?.last_freeze_event]);
+  });
+
+  it("the switch-to-easy rescue bridges the day and restores the build without a freeze", () => {
+    const result = applyBuildRescue({
+      abandonedBuild: offer,
+      currentBuild: null,
+      streakFreezes: 0,
+      todayStr: TODAY,
+      spendFreeze: false,
+      event: { by: "bob", mode: "hard", ledger: [] },
+    });
+    expect(result).toMatchObject({
+      current_build: { type: "skyscraper", days_completed: 4 },
+      abandoned_build: null,
+      streak_freezes: 0,
+      frozen_dates: ["2026-05-03"],
+    });
+    expect(result?.last_freeze_event).toMatchObject({ kind: "switch", by: "bob", remaining: 0 });
   });
 
   it("freezes the missed day so the next pass does not charge it again", () => {

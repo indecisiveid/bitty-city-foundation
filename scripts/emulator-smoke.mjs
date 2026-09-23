@@ -630,32 +630,68 @@ async function main() {
   check('second paid repair rejected', paidAgain.error === 'FAILED_PRECONDITION');
   await adminPatch(`groups/${g.group_id}`, { current_build: { nullValue: null } }, ['current_build']);
 
-  console.log('— missed build day → rescue —');
+  console.log('— missed build day with a freeze → settlement keeps the build itself —');
   // Seed: a 3-day apartment 1 day in, yesterday unprocessed and nobody
-  // completed, 1 freeze in stock, city already has buildings to lose.
+  // completed, a live chain, 1 freeze in stock, city already has buildings
+  // to lose. The freeze is spent on the missed day by the pass that settles
+  // it; the build never leaves current_build and the event says who missed.
   const buildingsBefore = (cityMap) =>
     Object.values(cityMap ?? {}).flat().filter((t) => t && t !== 'rubble').length;
   const preRescue = await call('getGroup', { group_id: g.group_id }, dev);
   const cityBefore = buildingsBefore(preRescue.result?.city_map);
   check('city has buildings to risk', cityBefore >= 1, `count=${cityBefore}`);
 
-  const missSeed = {
-    current_build: {
-      mapValue: {
-        fields: {
-          type: { stringValue: 'apartment' },
-          days_required: { integerValue: '3' },
-          days_completed: { integerValue: '1' },
-        },
+  const apartmentBuild = {
+    mapValue: {
+      fields: {
+        type: { stringValue: 'apartment' },
+        days_required: { integerValue: '3' },
+        days_completed: { integerValue: '1' },
       },
     },
+  };
+  const coveredSeed = {
+    current_build: apartmentBuild,
     abandoned_build: { nullValue: null },
     completions_today: { arrayValue: {} },
     streak_freezes: { integerValue: '1' },
-    last_processed_date: { stringValue: ymdDaysAgo(2) },
-    last_activity_date: { stringValue: ymdDaysAgo(2) },
+    frozen_dates: { arrayValue: {} },
+    broken_streak: { nullValue: null },
+    building_completions: { arrayValue: { values: [{ stringValue: ymdDaysAgo(1) }] } },
+    last_processed_date: { stringValue: ymdDaysAgo(1) },
+    last_activity_date: { stringValue: ymdDaysAgo(1) },
     pending_event: { nullValue: null },
     created_at: { timestampValue: new Date(Date.now() - 15 * 86400000).toISOString() },
+  };
+  await adminPatch(`groups/${g.group_id}`, coveredSeed, Object.keys(coveredSeed));
+  const afterCovered = await call('getGroup', { group_id: g.group_id }, dev);
+  check('covered miss keeps current_build at its progress',
+    afterCovered.result?.current_build?.type === 'apartment' &&
+      afterCovered.result?.current_build?.days_completed === 1,
+    JSON.stringify(afterCovered.result?.current_build));
+  check('covered miss makes no rescue offer', afterCovered.result?.abandoned_build === null,
+    JSON.stringify(afterCovered.result?.abandoned_build));
+  check('covered miss spent the freeze', afterCovered.result?.streak_freezes === 0,
+    `freezes=${afterCovered.result?.streak_freezes}`);
+  check('covered miss wrote the event with the build and who missed',
+    afterCovered.result?.last_freeze_event?.kind === 'auto' &&
+      afterCovered.result?.last_freeze_event?.build?.type === 'apartment' &&
+      Array.isArray(afterCovered.result?.last_freeze_event?.covered) &&
+      afterCovered.result?.last_freeze_event?.covered.length >= 1,
+    JSON.stringify(afterCovered.result?.last_freeze_event));
+  check('covered miss is in the ledger',
+    (afterCovered.result?.freeze_ledger ?? []).length >= 1,
+    JSON.stringify(afterCovered.result?.freeze_ledger));
+  check('covered miss destroys nothing',
+    buildingsBefore(afterCovered.result?.city_map) === cityBefore,
+    `before=${cityBefore} after=${buildingsBefore(afterCovered.result?.city_map)}`);
+
+  console.log('— missed build day with NO freeze → rescue offer —');
+  const missSeed = {
+    ...coveredSeed,
+    streak_freezes: { integerValue: '0' },
+    frozen_dates: { arrayValue: {} },
+    game_mode: { stringValue: 'hard' },
   };
   await adminPatch(`groups/${g.group_id}`, missSeed, Object.keys(missSeed));
   const afterMiss = await call('getGroup', { group_id: g.group_id }, dev);
@@ -672,6 +708,41 @@ async function main() {
       afterMiss.result?.abandoned_build?.days_completed === 1,
     JSON.stringify(afterMiss.result?.abandoned_build));
 
+  const rescueBroke = await call('rescueBuild', { group_id: g.group_id }, dev);
+  check('rescueBuild refused with no freeze', rescueBroke.error === 'FAILED_PRECONDITION',
+    JSON.stringify(rescueBroke));
+
+  // Hard-mode crew, no freeze: switching to easy mode saves the build for free.
+  const switchedRescue = await call('setGameMode', { group_id: g.group_id, mode: 'easy', rescue_build: true }, dev);
+  check('switch-to-easy restores the build', switchedRescue.result?.current_build?.type === 'apartment',
+    JSON.stringify(switchedRescue.result?.current_build));
+  check('switch-to-easy preserves progress', switchedRescue.result?.current_build?.days_completed === 1,
+    JSON.stringify(switchedRescue.result?.current_build));
+  check('switch-to-easy spends no freeze', switchedRescue.result?.streak_freezes === 0,
+    `freezes=${switchedRescue.result?.streak_freezes}`);
+  check('switch-to-easy set the mode', switchedRescue.result?.game_mode === 'easy');
+  check('switch-to-easy wrote a switch event', switchedRescue.result?.last_freeze_event?.kind === 'switch',
+    JSON.stringify(switchedRescue.result?.last_freeze_event));
+  check('switch-to-easy cleared the offer', switchedRescue.result?.abandoned_build === null);
+
+  // Legacy path: an offer plus a freeze in stock (a doc settled before this
+  // change) still rescues by hand, and "let it go" clears the offer.
+  const legacySeed = {
+    current_build: { nullValue: null },
+    abandoned_build: {
+      mapValue: {
+        fields: {
+          type: { stringValue: 'apartment' },
+          days_required: { integerValue: '3' },
+          days_completed: { integerValue: '1' },
+          abandoned_on: { stringValue: ymdDaysAgo(0) },
+        },
+      },
+    },
+    streak_freezes: { integerValue: '1' },
+    game_mode: { stringValue: 'hard' },
+  };
+  await adminPatch(`groups/${g.group_id}`, legacySeed, Object.keys(legacySeed));
   const rescued = await call('rescueBuild', { group_id: g.group_id }, dev);
   check('rescueBuild restores the build', rescued.result?.current_build?.type === 'apartment',
     JSON.stringify(rescued.result?.current_build));
@@ -680,11 +751,21 @@ async function main() {
   check('rescueBuild spent one freeze', rescued.result?.streak_freezes === 0,
     `freezes=${rescued.result?.streak_freezes}`);
   check('rescueBuild cleared the offer', rescued.result?.abandoned_build === null);
+  check('rescueBuild wrote a rescue event', rescued.result?.last_freeze_event?.kind === 'rescue',
+    JSON.stringify(rescued.result?.last_freeze_event));
   const rescueAgain = await call('rescueBuild', { group_id: g.group_id }, dev);
   check('second rescue rejected', rescueAgain.error === 'FAILED_PRECONDITION',
     JSON.stringify(rescueAgain));
   const rescueByStranger = await call('rescueBuild', { group_id: g.group_id });
   check('rescueBuild requires auth', rescueByStranger.error === 'UNAUTHENTICATED');
+
+  await adminPatch(`groups/${g.group_id}`, { current_build: { nullValue: null }, abandoned_build: legacySeed.abandoned_build }, ['current_build', 'abandoned_build']);
+  const letGo = await call('dismissRescue', { group_id: g.group_id }, dev);
+  check('dismissRescue clears the offer', letGo.result?.abandoned_build === null,
+    JSON.stringify(letGo.result?.abandoned_build));
+  const letGoAgain = await call('dismissRescue', { group_id: g.group_id }, dev);
+  check('dismissRescue is idempotent', letGoAgain.error === undefined && letGoAgain.result?.abandoned_build === null,
+    JSON.stringify(letGoAgain));
 
   console.log('— scheduled day rollover —');
   // The server settles days on its own clock (scheduled.ts → runDayRollover).
@@ -730,18 +811,29 @@ async function main() {
   const rf = rolledDoc.body?.fields ?? {};
   check('tick settled the day with no callable', rf.last_processed_date?.stringValue === ymdDaysAgo(0),
     JSON.stringify(rf.last_processed_date));
-  check('tick parked the stalled build for rescue',
-    rf.abandoned_build?.mapValue?.fields?.days_completed?.integerValue === '1' && rf.current_build?.nullValue === null,
-    JSON.stringify(rf.abandoned_build));
-  check('tick kept the streak (yesterday anchor)', rf.streak?.integerValue === '3', JSON.stringify(rf.streak));
+  // The city holds a freeze, so the server spends it on the missed day and
+  // keeps the build where it is — no offer, nothing for the crew to decide.
+  check('tick kept the build in place at its progress',
+    rf.current_build?.mapValue?.fields?.days_completed?.integerValue === '1' &&
+      (rf.abandoned_build === undefined || rf.abandoned_build?.nullValue === null),
+    JSON.stringify({ current: rf.current_build, abandoned: rf.abandoned_build }));
+  check('tick spent the freeze on the missed day',
+    rf.streak_freezes?.integerValue === '0' &&
+      (rf.frozen_dates?.arrayValue?.values ?? []).some((v) => v.stringValue === ymdDaysAgo(0)),
+    JSON.stringify({ freezes: rf.streak_freezes, frozen: rf.frozen_dates }));
+  check('tick kept the streak', rf.streak?.integerValue === '3', JSON.stringify(rf.streak));
+  check('tick wrote the freeze event with the build',
+    rf.last_freeze_event?.mapValue?.fields?.kind?.stringValue === 'auto' &&
+      (rf.last_freeze_event?.mapValue?.fields?.build?.mapValue?.fields?.type?.stringValue ?? '').startsWith('apartment'),
+    JSON.stringify(rf.last_freeze_event));
   const tick2 = await fireSchedule();
   const rolledAgain = await readDoc(`groups/${r.group_id}`, dev);
   check('second tick is a no-op',
-    tick2.ok && JSON.stringify(rolledAgain.body?.fields?.abandoned_build) === JSON.stringify(rf.abandoned_build));
+    tick2.ok && JSON.stringify(rolledAgain.body?.fields?.current_build) === JSON.stringify(rf.current_build) &&
+      rolledAgain.body?.fields?.streak_freezes?.integerValue === '0');
   const rescuedRoll = await call('rescueBuild', { group_id: r.group_id }, dev);
-  check('rescue after a server-settled day freezes the missed day',
-    (rescuedRoll.result?.frozen_dates ?? []).includes(ymdDaysAgo(0)),
-    JSON.stringify(rescuedRoll.result?.frozen_dates ?? rescuedRoll));
+  check('nothing left to rescue by hand after the server kept the build',
+    rescuedRoll.error === 'FAILED_PRECONDITION', JSON.stringify(rescuedRoll));
   await call('deleteGroup', { group_id: r.group_id }, dev);
 
   console.log('— restoring what the meteor broke —');

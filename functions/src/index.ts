@@ -12,6 +12,7 @@ export {
   leaveGroup,
   repairStreak,
   rescueBuild,
+  dismissRescue,
   repairTile,
   repairPark,
   upsertProfile,

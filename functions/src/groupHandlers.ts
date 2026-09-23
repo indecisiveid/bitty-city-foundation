@@ -255,6 +255,7 @@ function dayUpdatesFor(
     pausedDates: data.paused_dates ?? [],
     gameMode: normalizeGameMode(data.game_mode),
     nearMissDates: data.near_miss_dates ?? [],
+    freezeLedger: data.freeze_ledger ?? [],
   });
 
   return {
@@ -336,27 +337,29 @@ export async function maybeProcessDay(
     );
   }
 
-  // "Build stalled" push: a multi-day build lost a day. Nothing was
-  // destroyed, but the crew has only today to spend a freeze and resume it.
+  // "Build stalled" push: a multi-day build lost a day and there was no
+  // freeze to cover it. Nothing was destroyed; the crew has today to save it
+  // (a hard-mode crew can switch to easy mode for free). With a freeze in
+  // stock settlement rescues the build itself, so this only fires at zero.
   const stalled = writeUpdates.abandoned_build as
     | { type?: string; days_completed?: number; days_required?: number }
     | null
     | undefined;
   if (stalled) {
     const label = labelFor(stalled.type ?? "");
-    const freezes = (writeUpdates.streak_freezes as number | undefined) ?? 0;
+    const mode = normalizeGameMode(merged.game_mode);
     // What a miss IS depends on the mode: hard stalls when anyone is missing,
     // easy only when nobody finished at all.
     const why =
-      normalizeGameMode(merged.game_mode) === "easy"
-        ? "Nobody finished yesterday's goal."
-        : "Yesterday's goal wasn't finished by everyone.";
+      mode === "easy"
+        ? "Nobody finished yesterday's goal, and there are no streak freezes left."
+        : "Not everyone finished yesterday's goal, and there are no streak freezes left.";
     await notifyAllMembers(groupId, merged, {
       title: `🚧 Your ${label} build stalled`,
       body:
-        freezes > 0
-          ? `${why} Open the app today to spend a streak freeze and pick it back up — after today it's gone.`
-          : `${why} There are no streak freezes left, so you'll need to start a new build.`,
+        mode === "hard"
+          ? `${why} Switch to easy mode today to pick it back up where it stalled — after today it's gone.`
+          : `${why} Open the app to pick a new build.`,
     });
   }
 
@@ -1205,6 +1208,11 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
       frozenDates: freshData.frozen_dates ?? [],
       brokenStreak: freshData.broken_streak ?? null,
       todayStr: today,
+      event: {
+        by: member,
+        mode: normalizeGameMode(freshData.game_mode),
+        ledger: freshData.freeze_ledger ?? [],
+      },
     });
 
     if (!rescued) {
@@ -1234,6 +1242,28 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
   }
 
   return groupToResponse(group_id, finalData!);
+});
+
+// --- dismissRescue ---
+// "Let it go": the crew declines to save a stalled build. Clearing the offer
+// server-side is what stops the sheet reappearing on every open for the rest
+// of the rescue window — a local dismissal alone never survived a relaunch.
+// Idempotent: nothing to clear is not an error.
+
+export const dismissRescue = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const { group_id } = request.data ?? {};
+  if (!group_id) throw new HttpsError("invalid-argument", "group_id is required");
+
+  const groupRef = db().collection("groups").doc(group_id);
+  const snap = await groupRef.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Group not found");
+  const data = snap.data()!;
+  memberNameForUid(data, uid);
+
+  if (!data.abandoned_build) return groupToResponse(group_id, data);
+  await groupRef.update({ abandoned_build: null });
+  return groupToResponse(group_id, { ...data, abandoned_build: null });
 });
 
 // --- repairStreak ---
@@ -1287,6 +1317,11 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
       brokenStreak,
       todayStr: today,
       payment,
+      event: {
+        by: member,
+        mode: normalizeGameMode(fresh.game_mode),
+        ledger: fresh.freeze_ledger ?? [],
+      },
     });
     if (!repaired) {
       throw new HttpsError(
