@@ -21,6 +21,11 @@ functions/src/
                      (dayShare), fractional-progress snapping, the near-miss
                      ledger + "try easy mode" suggestion rule.
   modeHandlers.ts    Callables: setGameMode (any member), dismissModeSuggestion
+  goals.ts           PURE — goal categories (goal_type: custom|exercise|mindfulness),
+                     general tags with no thresholds; absent = custom
+  cityHandlers.ts    Callable: updateCitySettings (any member) — name, goal text,
+                     goal category. NOT reset time/timezone (moving the day
+                     boundary mid-game needs its own design)
   groupHandlers.ts   Callables: createGroup, joinGroup, getGroup,
                      completeGoal, selectBuild, deleteGroup, leaveGroup,
                      repairStreak, rescueBuild, repairTile, repairPark,
@@ -67,7 +72,8 @@ scripts/emulator-smoke.mjs   end-to-end emulator test (see below)
 
 `groups/{id}`: `group_code, group_name, group_members: string[]` (display
 names, ≤4), `owner_uid`, `member_uids: string[]` (index-aligned with
-group_members), `daily_goal`, `goal_reset_time "HH:MM"`,
+group_members), `daily_goal` (free text), `goal_type` (absent = custom; see
+`goals.ts`), `goal_reset_time "HH:MM"`,
 `goal_reset_timezone` (IANA), `completions_today: string[]` (names),
 `streak`, `streak_freezes` (start 1, cap 3, +1 per landing),
 `frozen_dates: string[]`, `broken_streak: {value, broken_on,

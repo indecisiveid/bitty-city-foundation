@@ -175,3 +175,34 @@ export function easyModeSuggestionMessage(
       `to make progress. Tap to switch.`,
   };
 }
+
+/**
+ * Someone edited the city's settings. Only a new goal or a new name is worth
+ * a push: the goal is what everyone has to do, the name is how they find the
+ * city. A category change alone is a quiet tag and sends nothing.
+ */
+export function citySettingsChangedMessage(
+  byName: string,
+  oldCityName: string,
+  change: { newName?: string; newGoal?: string },
+): CrewMessage | null {
+  const cityName = change.newName ?? oldCityName;
+  const renamed = change.newName !== undefined
+    ? `${oldCityName} is now called ${change.newName}. `
+    : "";
+  if (change.newGoal !== undefined) {
+    return {
+      title: `🎯 ${byName} changed the goal for ${cityName}`,
+      body:
+        `${renamed}New goal: "${change.newGoal}". ` +
+        `Anything already checked in today still counts.`,
+    };
+  }
+  if (change.newName !== undefined) {
+    return {
+      title: `🏷️ ${byName} renamed ${oldCityName}`,
+      body: `${renamed}Same crew, same streak.`,
+    };
+  }
+  return null;
+}

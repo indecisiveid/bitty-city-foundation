@@ -44,4 +44,6 @@ export { dismissQuest, demoOfferQuest } from "./questHandlers";
 export { buyHardHats } from "./shopHandlers";
 export { redeemPurchase, placeHardHats } from "./storeHandlers";
 
+export { updateCitySettings } from "./cityHandlers";
+
 export { dailyNudge } from "./scheduled";

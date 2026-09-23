@@ -1,5 +1,6 @@
 import { HttpsError } from "firebase-functions/v2/https";
 import { normalizeGameMode } from "./gameMode";
+import { DEFAULT_GOAL_TYPE, GoalType, isGoalType, normalizeGoalType } from "./goals";
 
 const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -61,6 +62,15 @@ export function requireResetTime(value: unknown): string {
   return v;
 }
 
+/** Absent → custom (old binaries never send one). Anything else must be known. */
+export function requireGoalType(value: unknown): GoalType {
+  if (value === undefined || value === null) return DEFAULT_GOAL_TYPE;
+  if (!isGoalType(value)) {
+    throw new HttpsError("invalid-argument", "goal_type is not a known goal category");
+  }
+  return value;
+}
+
 // --- Shared response shape (used by group + demo handlers) ---
 
 export function groupToResponse(
@@ -75,6 +85,7 @@ export function groupToResponse(
     owner_uid: data.owner_uid ?? null,
     member_uids: data.member_uids ?? [],
     daily_goal: data.daily_goal,
+    goal_type: normalizeGoalType(data.goal_type),
     goal_reset_time: data.goal_reset_time,
     goal_reset_timezone: data.goal_reset_timezone ?? "UTC",
     completions_today: data.completions_today,

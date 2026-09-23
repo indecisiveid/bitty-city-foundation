@@ -27,6 +27,7 @@ import {
   groupToResponse,
   requireTrimmed,
   requireResetTime,
+  requireGoalType,
   EMPTY_CITY,
   MAX_MEMBERS_PER_GROUP,
   MAX_GROUPS_PER_USER,
@@ -469,6 +470,7 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
     throw new HttpsError("invalid-argument", "game_mode must be 'easy' or 'hard'");
   }
   const gameMode: GameMode = isGameMode(rawMode) ? rawMode : LEGACY_GAME_MODE;
+  const goalType = requireGoalType(request.data.goal_type);
 
   const groupId = uuidv4();
   const userRef = db().collection("users").doc(uid);
@@ -505,6 +507,7 @@ export const createGroup = onCall({ enforceAppCheck: true }, async (request) => 
           owner_uid: uid,
           member_uids: [uid],
           daily_goal: dailyGoal,
+          goal_type: goalType,
           goal_reset_time: goalResetTime,
           goal_reset_timezone: goalResetTimezone,
           game_mode: gameMode,
