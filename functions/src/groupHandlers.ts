@@ -54,8 +54,47 @@ import {
 } from "./gameMode";
 import { easyModeSuggestionMessage } from "./crewMessages";
 import { proofsBucket, proofObjectSize, deleteProofObject, deleteProofPrefix } from "./proofStorage";
+import { applyBrickEntry, bricksForLanding } from "./bricks";
 
 const db = () => getFirestore();
+
+/**
+ * Pay every member of the city for a landing. Bricks are personal, so this
+ * is one small transaction per wallet; the landing's event id is the
+ * idempotency key, so the settlement fallback and completeGoal can both
+ * pass through here for the same landing and it pays once. Best-effort:
+ * a wallet write failing never fails the landing that earned it.
+ */
+export async function grantLandingBricks(
+  groupId: string,
+  data: FirebaseFirestore.DocumentData,
+  event: { event_id?: string; type?: string; building?: string } | null | undefined,
+): Promise<void> {
+  if (!event || event.type !== "build_complete" || !event.event_id) return;
+  const amount = bricksForLanding(daysFor(event.building ?? ""));
+  const uids: string[] = data.member_uids ?? [];
+  const at = new Date().toISOString();
+  await Promise.all(
+    uids.map(async (uid) => {
+      const ref = db().collection("users").doc(uid);
+      try {
+        await db().runTransaction(async (tx) => {
+          const snap = await tx.get(ref);
+          const next = applyBrickEntry(snap.exists ? snap.data()! : null, {
+            event_id: event.event_id!,
+            amount,
+            reason: "landing",
+            group_id: groupId,
+            at,
+          });
+          if (next) tx.set(ref, next, { merge: true });
+        });
+      } catch (e) {
+        console.error(`bricks: grant to ${uid} for ${event.event_id} failed`, e);
+      }
+    }),
+  );
+}
 
 /** Drop one member from a name-keyed proof bucket. */
 function withoutEntry(entries: Record<string, unknown> | null | undefined, name: string): Record<string, unknown> {
@@ -321,6 +360,7 @@ export async function maybeProcessDay(
     | { type?: string; building?: string; restored?: boolean }
     | undefined;
   if (event?.type === "build_complete") {
+    await grantLandingBricks(groupId, merged, writeUpdates.pending_event as { event_id?: string; type?: string; building?: string });
     const label = labelFor(event.building ?? "");
     await notifyAllMembers(
       groupId,
@@ -819,6 +859,11 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       ...landingUpdates,
     };
   });
+
+  // The landing pays the crew. After the write, keyed by the event id.
+  if (landedBuild) {
+    await grantLandingBricks(group_id, finalData!, finalData!.pending_event);
+  }
 
   // "Teammate completed" push → nudge the crew members who still haven't
   // finished today (the pressure's on them). Best-effort, after the write.

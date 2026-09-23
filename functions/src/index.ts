@@ -39,4 +39,6 @@ export { setMemberPause, setCityPause } from "./pauseHandlers";
 
 export { setGameMode, dismissModeSuggestion } from "./modeHandlers";
 
+export { buyHardHats } from "./shopHandlers";
+
 export { dailyNudge } from "./scheduled";
