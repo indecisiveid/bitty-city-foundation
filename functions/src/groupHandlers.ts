@@ -340,7 +340,8 @@ export async function maybeProcessDay(
 
   // "Build stalled" push: a multi-day build lost a day and there was no
   // freeze to cover it. Nothing was destroyed; the crew has today to save it
-  // (a hard-mode crew can switch to easy mode for free). With a freeze in
+  // (a hard-mode crew can switch to easy mode for free, on builds with the
+  // new stall sheet). With a freeze in
   // stock settlement rescues the build itself, so this only fires at zero.
   const stalled = writeUpdates.abandoned_build as
     | { type?: string; days_completed?: number; days_required?: number }
@@ -355,8 +356,12 @@ export async function maybeProcessDay(
     await notifyAllMembers(groupId, merged, {
       title: `🚧 ${label} stalled`,
       body:
+        // Hard mode doesn't name the easy-mode switch: 1.2 and older can't
+        // save a build that way (their mode switch sends no rescue_build),
+        // so the push would promise what their app can't do. Name it again
+        // once every install has the stall sheet that offers it.
         mode === "hard"
-          ? `${why} No freezes left. Switch to easy mode today to save it.`
+          ? `${why} No freezes left. Open the city today to see your options.`
           : `${why} No freezes left. Pick a new build.`,
     });
   }
