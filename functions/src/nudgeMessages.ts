@@ -14,6 +14,10 @@ export interface MessageContext {
   build: BuildProgress | null;
   /** Members who still haven't completed — names the last-call chaser uses. */
   pendingNames?: string[];
+  /** Members already done today, in completion order — "Amit already checked in". */
+  completedNames?: string[];
+  /** Label of the build that lands if the crew wins today (buildings.landingTodayLabel). */
+  landsToday?: string | null;
 }
 
 /**
@@ -33,6 +37,47 @@ function pendingClause(names: string[]): string {
   if (names.length === 1) return `${names[0]} hasn't`;
   if (names.length === 2) return `${names[0]} and ${names[1]} haven't`;
   return `${names[0]} and ${names.length - 1} others haven't`;
+}
+
+/**
+ * Who has already checked in, as a lead-in. Naming the friend who is done is
+ * the strongest sentence a reminder can open with — it turns "do your goal"
+ * into "your crew is waiting on you" — and when the recipient is the last one
+ * out, it says so.
+ */
+function alreadyIn(ctx: MessageContext): string {
+  const done = ctx.completedNames ?? [];
+  if (done.length === 0) return "";
+  const who =
+    done.length === 1
+      ? done[0]
+      : done.length === 2
+        ? `${done[0]} and ${done[1]}`
+        : `${done[0]} and ${done.length - 1} others`;
+  const pending = ctx.pendingNames?.length ?? 0;
+  if (pending <= 1) return `${who} already checked in — you're the last one. `;
+  return `${who} already checked in. ${pending} still to go. `;
+}
+
+/** The concrete thing at stake tonight, when a build would land. */
+function landing(ctx: MessageContext): string {
+  return ctx.landsToday ? ` Finish today and your ${ctx.landsToday} lands tonight.` : "";
+}
+
+/**
+ * The push a dormant person gets once, before reminders go quiet for them.
+ * Neutral on purpose: no guilt, no countdown — just the fact and the door
+ * left open (spec §9.5).
+ */
+export function farewellMessage(cityNames: string[]) {
+  const where =
+    cityNames.length === 1
+      ? `Your city ${cityNames[0]} will be waiting`
+      : "Your cities will be waiting";
+  return {
+    title: "👋 We'll stop reminding you",
+    body: `You haven't opened Bitty City in two weeks, so we'll stop these reminders. ${where} whenever you're back.`,
+  };
 }
 
 /**
@@ -87,26 +132,26 @@ export function messageFor(
       }
       return {
         title: "🌅 Good morning",
-        body: `Plan when you'll finish today's goal in ${cityName}.${stake(`Your ${streak}-day streak depends on it.`)}`,
+        body: `${alreadyIn(ctx)}Plan when you'll finish today's goal in ${cityName}.${stake(`Your ${streak}-day streak depends on it.`)}${landing(ctx)}`,
       };
 
     case "midday":
       return {
         title: onStreak ? "🔥 Keep the streak alive" : "Bitty City",
-        body: `Don't forget today's goal in ${cityName}.${stake(`Your ${streak}-day streak is on the line.`)}`,
+        body: `${alreadyIn(ctx)}Don't forget today's goal in ${cityName}.${stake(`Your ${streak}-day streak is on the line.`)}${landing(ctx)}`,
       };
 
     case "evening":
       return {
         title: onStreak ? "🔥 Streak still open" : "Bitty City",
-        body: `Today's goal in ${cityName} still isn't checked off.${stake(`Your ${streak}-day streak is riding on it.`)}`,
+        body: `${alreadyIn(ctx)}Today's goal in ${cityName} still isn't checked off.${stake(`Your ${streak}-day streak is riding on it.`)}${landing(ctx)}`,
       };
 
     case "lastCall":
     default:
       return {
         title: "⏳ Last call",
-        body: `The day's nearly done and today's goal in ${cityName} is still open.${stake(`Last chance to save your ${streak}-day streak.`)}`,
+        body: `${alreadyIn(ctx)}The day's nearly done and today's goal in ${cityName} is still open.${stake(`Last chance to save your ${streak}-day streak.`)}${landing(ctx)}`,
       };
   }
 }
@@ -133,6 +178,8 @@ export interface NudgeEntry {
   nudge: Nudge;
   ctx: MessageContext;
   role: NudgeRole;
+  /** The city's game-date this decision belongs to (per-person daily caps key on it). */
+  gameDate?: string;
 }
 
 export interface ConsolidatedPush {

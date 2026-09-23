@@ -200,6 +200,36 @@ async function fireSchedule(name = 'dailyNudge') {
   return res;
 }
 
+
+/**
+ * A fixed-offset IANA zone in which the current wall clock falls inside the
+ * given reminder slot's 30-minute window. Slots start at :00 (morning 08:00,
+ * lastCall 21:00) or :30 (midday 11:30, evening 17:30), so with whole-hour
+ * offsets the UTC minute decides which pair is reachable right now; the hour
+ * is then a matter of picking the offset. `Etc/GMT+5` means UTC-5 (POSIX sign).
+ */
+function zoneInSlot(slotMinutes) {
+  const now = new Date();
+  const utcMin = now.getUTCMinutes();
+  const wantHour = Math.floor(slotMinutes / 60);
+  const wantMin = slotMinutes % 60;
+  if ((utcMin >= 30) !== (wantMin >= 30)) return null;
+  const offset = ((wantHour - now.getUTCHours()) % 24 + 24) % 24; // 0..23
+  const signed = offset > 14 ? offset - 24 : offset; // -9..14
+  return signed === 0 ? 'Etc/GMT' : `Etc/GMT${signed > 0 ? '-' : '+'}${Math.abs(signed)}`;
+}
+const SLOT = { morning: 8 * 60, midday: 11 * 60 + 30, evening: 17 * 60 + 30, lastCall: 21 * 60 };
+/** Today's YYYY-MM-DD on the wall clock of an IANA zone. */
+function localYmd(zone) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+/** The late slot (evening/lastCall) and the early slot (morning/midday) reachable this minute. */
+function reachableSlots() {
+  const late = new Date().getUTCMinutes() >= 30 ? 'evening' : 'lastCall';
+  const early = new Date().getUTCMinutes() >= 30 ? 'midday' : 'morning';
+  return { late, early };
+}
+
 function ymdDaysAgo(n) {
   const d = new Date(Date.now() - n * 86400000);
   return d.toISOString().slice(0, 10);
@@ -1152,6 +1182,78 @@ async function main() {
   const switched = await call('setGameMode', { group_id: easyCity.group_id, mode: 'easy' }, dev);
   check('switching answers the suggestion', switched.result?.game_mode === 'easy' && switched.result?.mode_suggestion === null, JSON.stringify(switched.result?.mode_suggestion));
   await call('deleteGroup', { group_id: easyCity.group_id }, dev);
+
+
+  console.log('— reminders: presence + per-person tiers —');
+  // Presence: the callables dev has been calling all along (getGroup,
+  // completeGoal) stamp users/{uid}.last_seen_at; completeGoal also records
+  // the local minute for the personal-send-time work.
+  const devDoc = await readDoc(`users/${dev.uid}`, dev);
+  const devF = devDoc.body?.fields ?? {};
+  check('presence: last_seen_at stamped by ordinary play', typeof devF.last_seen_at?.timestampValue === 'string', JSON.stringify(devF.last_seen_at));
+  check('presence: completion minute recorded', (devF.completion_minutes?.arrayValue?.values ?? []).length >= 1, JSON.stringify(devF.completion_minutes));
+
+  // A dormant solo owner: seed a city whose clock is inside a late slot right
+  // now (solo cities only hear evening, and last call while a streak is at
+  // stake), mark the owner as last seen 20 days ago, and fire the tick.
+  const { late: lateSlot, early: earlySlot } = reachableSlots();
+  const lateZone = zoneInSlot(SLOT[lateSlot]);
+  const dormantCity = (await call(
+    'createGroup',
+    { group_name: 'Dormant Town', member: 'Bob', daily_goal: 'Walk', goal_reset_time: '00:00', goal_reset_timezone: lateZone },
+    bob,
+  )).result;
+  // Seed a live streak (last call for a solo city only fires while one is at
+  // stake) AND mark today as already settled: the tick runs day rollover
+  // first, and a never-processed city would be settled on the spot, which
+  // recomputes the streak from an empty completions log — back to 0 — before
+  // the nudge pass ever looks at it.
+  await adminPatch(
+    `groups/${dormantCity.group_id}`,
+    { streak: { integerValue: '3' }, last_processed_date: { stringValue: localYmd(lateZone) } },
+    ['streak', 'last_processed_date'],
+  );
+  await adminPatch(
+    `users/${bob.uid}`,
+    { last_seen_at: { timestampValue: new Date(Date.now() - 20 * 86400000).toISOString() } },
+    ['last_seen_at'],
+  );
+  const tickA = await fireSchedule();
+  check(`reminders: tick accepted in ${lateSlot} window (${lateZone})`, tickA.ok, `status=${tickA.status}`);
+  const dormantDoc = await readDoc(`groups/${dormantCity.group_id}`, bob);
+  const dormantSlots = (dormantDoc.body?.fields?.reminders_sent_slots?.arrayValue?.values ?? []).map((v) => v.stringValue);
+  check('reminders: the city decided the slot', dormantSlots.includes(lateSlot), JSON.stringify(dormantSlots));
+  const bobDoc = await readDoc(`users/${bob.uid}`, bob);
+  const bobRem = bobDoc.body?.fields?.reminders?.mapValue?.fields ?? {};
+  check('reminders: dormant owner got the farewell', typeof bobRem.farewell_sent_at?.timestampValue === 'string', JSON.stringify(bobRem));
+  check('reminders: farewell counted as the day\'s one push', bobRem.sent?.integerValue === '1', JSON.stringify(bobRem.sent));
+  // Second tick, same slot: the slot is already claimed and the farewell is
+  // already sent — nothing moves.
+  await fireSchedule();
+  const bobDoc2 = await readDoc(`users/${bob.uid}`, bob);
+  const bobRem2 = bobDoc2.body?.fields?.reminders?.mapValue?.fields ?? {};
+  check('reminders: farewell is not repeated', bobRem2.sent?.integerValue === '1' && bobRem2.farewell_sent_at?.timestampValue === bobRem.farewell_sent_at?.timestampValue, JSON.stringify(bobRem2));
+  // He opens the app → presence clears the farewell.
+  await call('getGroup', { group_id: dormantCity.group_id }, bob);
+  const bobDoc3 = await readDoc(`users/${bob.uid}`, bob);
+  const bobF3 = bobDoc3.body?.fields ?? {};
+  check('presence: opening the app clears the farewell', bobF3.reminders?.mapValue?.fields?.farewell_sent_at?.nullValue === null, JSON.stringify(bobF3.reminders));
+  check('presence: …and refreshes last_seen_at', new Date(bobF3.last_seen_at?.timestampValue ?? 0) > new Date(Date.now() - 60000), JSON.stringify(bobF3.last_seen_at));
+  await call('deleteGroup', { group_id: dormantCity.group_id }, bob);
+
+  // A solo city in an EARLY slot decides nothing at all — no claim, no push.
+  const earlyZone = zoneInSlot(SLOT[earlySlot]);
+  const quietCity = (await call(
+    'createGroup',
+    { group_name: 'Quiet Town', member: 'Eve', daily_goal: 'Read', goal_reset_time: '00:00', goal_reset_timezone: earlyZone },
+    eve,
+  )).result;
+  await fireSchedule();
+  const quietDoc = await readDoc(`groups/${quietCity.group_id}`, eve);
+  check(`reminders: solo city stays quiet at ${earlySlot} (${earlyZone})`, quietDoc.body?.fields?.reminders_sent_slots === undefined, JSON.stringify(quietDoc.body?.fields?.reminders_sent_slots));
+  const eveDoc = await readDoc(`users/${eve.uid}`, eve);
+  check('reminders: …and its owner was sent nothing', eveDoc.body?.fields?.reminders === undefined, JSON.stringify(eveDoc.body?.fields?.reminders));
+  await call('deleteGroup', { group_id: quietCity.group_id }, eve);
 
   console.log('— profile upsert —');
   const upsert = await call('upsertProfile', { display_name: '  Chrisso  ' }, dev);

@@ -59,3 +59,26 @@ export function buildProgressOf(currentBuild: unknown): BuildProgress | null {
     daysRequired,
   };
 }
+
+/**
+ * The label of the build that LANDS if the crew wins today, or null. Unlike
+ * `buildProgressOf` this includes single-day builds: "finish today and your
+ * Cottage lands tonight" is exactly the stake a fresh solo city has.
+ */
+export function landingTodayLabel(currentBuild: unknown): string | null {
+  if (!currentBuild || typeof currentBuild !== "object") return null;
+  const build = currentBuild as {
+    type?: string;
+    days_required?: number;
+    days_completed?: number;
+    target_tile?: unknown;
+    target_park?: unknown;
+  };
+  const type = build.type ?? "";
+  const daysRequired = build.days_required ?? daysFor(type) ?? 0;
+  if (daysRequired < 1) return null;
+  const daysCompleted = build.days_completed ?? 0;
+  if (daysRequired - daysCompleted > 1) return null;
+  const label = labelFor(type);
+  return build.target_tile != null || build.target_park != null ? `${label} restoration` : label;
+}

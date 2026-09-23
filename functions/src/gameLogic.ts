@@ -455,9 +455,10 @@ export function needsDayProcessing(
 export function getProcessingDate(
   goalResetTime: string,
   goalResetTimezone: string = "UTC",
+  at: Date = new Date(),
 ): string {
   const tz = resolveZone(goalResetTimezone);
-  const now = DateTime.now().setZone(tz);
+  const now = DateTime.fromJSDate(at).setZone(tz);
   const [hour, minute] = goalResetTime.split(":").map(Number);
 
   const resetToday = now.set({ hour, minute, second: 0, millisecond: 0 });

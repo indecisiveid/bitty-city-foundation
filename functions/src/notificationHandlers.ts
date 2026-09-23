@@ -8,6 +8,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { requireAuth } from "./auth";
 import { isValidPushToken } from "./push";
 import { notifyUids } from "./notify";
+import { touchLastSeen } from "./presence";
 
 const db = () => getFirestore();
 
@@ -26,6 +27,10 @@ export const registerPushToken = onCall({ enforceAppCheck: true }, async (reques
     .collection("users")
     .doc(uid)
     .set({ push_tokens: FieldValue.arrayUnion(token) }, { merge: true });
+
+  // The app registers once per session, on launch — a clean "opened the app"
+  // signal even for someone who never taps into a city (presence.ts).
+  await touchLastSeen(uid);
 
   return { success: true };
 });

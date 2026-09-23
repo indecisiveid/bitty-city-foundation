@@ -37,18 +37,26 @@
  * person (see nudgeMessages.consolidate). Deciding stays per-city because
  * timezone, streak and crew are per-city; only delivery is per-person.
  *
+ * Pass 2 is also where a PERSON's own state gates the send (reminderTiers):
+ * someone who hasn't opened the app in a week gets at most one push a day,
+ * and after two weeks one farewell and then silence. The per-city slot claim
+ * in pass 1 is unaffected — it records what the city decided, not what each
+ * member ended up hearing.
+ *
  * Scope note: this scans every group each tick. Fine at launch scale; if the
  * group count grows large, precompute a `next_nudge_at` field and query on it
  * instead of scanning.
  */
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { DateTime } from "luxon";
 import { getProcessingDate, daysBetween } from "./gameLogic";
 import { decideNudge, SlotId } from "./reminderLogic";
-import { notifyUids, uidsForNames } from "./notify";
-import { buildProgressOf } from "./buildings";
-import { consolidate, NudgeEntry } from "./nudgeMessages";
+import { loadUsers, notifySnaps, uidsForNames } from "./notify";
+import { buildProgressOf, landingTodayLabel } from "./buildings";
+import { consolidate, farewellMessage, NudgeEntry } from "./nudgeMessages";
+import { applyUserTier, reminderStateOf, sentTodayOf, tierFor } from "./reminderTiers";
+import { idleDaysFor } from "./presence";
 import { activeMembersOn, isDayPaused, rosterOf } from "./pauses";
 import { normalizeGameMode } from "./gameMode";
 import { dueForDayProcessing, maybeProcessDay } from "./groupHandlers";
@@ -95,7 +103,12 @@ export async function runDayRollover(): Promise<{ due: number; settled: number }
   return { due: due.length, settled };
 }
 
-async function runNudges(): Promise<void> {
+/**
+ * `now` is injectable for tests; production passes the tick time. Every
+ * timezone/game-date computation below derives from it, never from the wall
+ * clock directly, so a test can pin "it is 17:35 in New York".
+ */
+export async function runNudges(now: Date = new Date()): Promise<void> {
   const snap = await db().collection("groups").get();
 
   // uid → every city that owes this person a nudge on this tick. Filled by the
@@ -114,10 +127,10 @@ async function runNudges(): Promise<void> {
     snap.docs.map(async (doc) => {
       const data = doc.data();
       const tz: string = data.goal_reset_timezone ?? "UTC";
-      const now = DateTime.now().setZone(tz);
-      if (!now.isValid) return;
+      const local = DateTime.fromJSDate(now).setZone(tz);
+      if (!local.isValid) return;
 
-      const todayGameDate = getProcessingDate(data.goal_reset_time ?? "00:00", tz);
+      const todayGameDate = getProcessingDate(data.goal_reset_time ?? "00:00", tz, now);
       // Vacation mode: a paused city has nothing to nudge about (and its
       // meteor can't fall, so no warning either), and a member on vacation
       // is neither reminded nor counted against the crew.
@@ -133,7 +146,7 @@ async function runNudges(): Promise<void> {
       const sentSlots: SlotId[] = data.reminders_sent_slots ?? [];
 
       const nudge = decideNudge({
-        localMinutes: now.hour * 60 + now.minute,
+        localMinutes: local.hour * 60 + local.minute,
         todayGameDate,
         remindersSentDate: sentDate,
         remindersSentSlots: sentSlots,
@@ -166,8 +179,11 @@ async function runNudges(): Promise<void> {
         streak: data.streak ?? 0,
         build: buildProgressOf(data.current_build),
         pendingNames: incomplete,
+        // Completion order, so "Amit already checked in" names the first one in.
+        completedNames: completions,
+        landsToday: landingTodayLabel(data.current_build),
       };
-      const base = { groupId: doc.id, cityName, nudge, ctx };
+      const base = { groupId: doc.id, cityName, nudge, ctx, gameDate: todayGameDate };
 
       // The meteor is about the CITY, not about who owes what, so the whole
       // crew is enrolled with the identical warning.
@@ -194,12 +210,54 @@ async function runNudges(): Promise<void> {
   );
 
   // --- Pass 2: one push per person, however many cities they hold. ---------
+  // One batched read of every recipient's user doc: tokens, presence and the
+  // per-person reminder state all live there.
+  const users = await loadUsers([...byUid.keys()]);
   await Promise.all(
     [...byUid.entries()].map(async ([uid, entries]) => {
-      const payload = consolidate(entries);
-      if (payload) await notifyUids([uid], payload);
+      const userSnap = users.get(uid);
+      const user = userSnap?.data() ?? {};
+      const tier = tierFor(idleDaysFor(user, now));
+      const state = reminderStateOf(user.reminders);
+      // A person in cities on different clocks: key the daily cap on the date
+      // of the city that woke them this tick. Good enough at this scale.
+      const todayDate = entries[0].gameDate ?? now.toISOString().slice(0, 10);
+      const decision = applyUserTier(entries, tier, state, todayDate);
+      if (decision.action === "skip") return;
+
+      const sentToday = sentTodayOf(state, todayDate);
+      if (decision.action === "farewell") {
+        const cities = [...new Set(entries.map((e) => e.cityName))];
+        const single = entries.length === 1 ? { data: { group_id: entries[0].groupId } } : {};
+        if (userSnap) await notifySnaps([userSnap], { ...farewellMessage(cities), ...single });
+        await recordReminder(userSnap, {
+          date: todayDate,
+          sent: sentToday + 1,
+          farewell_sent_at: Timestamp.fromDate(now),
+        });
+        return;
+      }
+
+      const payload = consolidate(decision.entries);
+      if (!payload) return;
+      if (userSnap) await notifySnaps([userSnap], payload);
+      await recordReminder(userSnap, { date: todayDate, sent: sentToday + 1 });
     }),
   );
+}
+
+/** Persist what this person was sent today (`users/{uid}.reminders`). Best-effort. */
+async function recordReminder(
+  userSnap: FirebaseFirestore.DocumentSnapshot | undefined,
+  fields: Record<string, unknown>,
+): Promise<void> {
+  // No user doc means no tokens and nothing to cap; don't conjure one.
+  if (!userSnap?.exists) return;
+  try {
+    await userSnap.ref.set({ reminders: fields }, { merge: true });
+  } catch (err) {
+    console.error("[nudge] recordReminder failed", userSnap.id, err);
+  }
 }
 
 // Every 30 minutes — the :30 slots (11:30, 17:30) need half-hour granularity.
@@ -211,6 +269,6 @@ export const dailyNudge = onSchedule(
   { schedule: "every 30 minutes", timeoutSeconds: 300, memory: "256MiB" },
   async () => {
     await runDayRollover();
-    await runNudges();
+    await runNudges(new Date());
   },
 );

@@ -34,6 +34,12 @@
  * A crew that is already complete is never nudged at all, so the last-call
  * chaser can only reach someone whose crew genuinely still has a gap.
  *
+ * A SOLO city is different. The four-slot escalation exists for crews — the
+ * chaser mechanic, "who's holding the day up" — and to one person it is just
+ * the same nag four times. A solo city gets ONE reminder (evening), plus last
+ * call only while a live streak is at stake, plus the meteor warning at any
+ * slot. (Per-person frequency on top of this lives in reminderTiers.ts.)
+ *
  * The message escalates by urgency:
  *
  *   meteor   → the 7-day inactivity meteor lands tomorrow unless today's goal
@@ -89,7 +95,7 @@ export interface NudgeInput {
 
 export interface Nudge {
   kind: NudgeKind;
-  /** 'all' for the meteor warning, 'incomplete' otherwise. */
+  /** 'all' for the meteor warning and last call, 'incomplete' otherwise. */
   recipients: "all" | "incomplete";
   /** Which of the four daily slots this nudge is filling. */
   slot: SlotId;
@@ -158,6 +164,12 @@ export function decideNudge(input: NudgeInput): Nudge | null {
     daysUntilMeteor(input.idleDays, input.daysSinceMeteor) === 1;
   if (meteorImminent) return { kind: "meteor", recipients: "all", slot };
 
+  // Solo: no morning plan, no midday nag — one person doesn't need a crew's
+  // escalation ladder. Evening is the one reminder; last call is decided
+  // below, once we know whether a streak is on the line.
+  const solo = input.memberCount === 1;
+  if (solo && (slot === "morning" || slot === "midday")) return null;
+
   // Last call goes to the whole crew — the members who are done are the ones
   // who can still chase the stragglers, and this is the last moment it can
   // make a difference.
@@ -166,6 +178,9 @@ export function decideNudge(input: NudgeInput): Nudge | null {
   const streakAtRisk =
     input.streak > 0 && ((input.gameMode ?? "hard") === "hard" || input.completedCount === 0);
   if (streakAtRisk) return { kind: "streak", recipients, slot };
+
+  // Solo, nothing at stake: the evening reminder already said it.
+  if (solo && slot === "lastCall") return null;
 
   return { kind: "reminder", recipients, slot };
 }

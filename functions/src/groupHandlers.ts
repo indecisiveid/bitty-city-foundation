@@ -33,6 +33,7 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
+import { touchLastSeen, localMinutesOf } from "./presence";
 import { joinedMessage, leftMessage } from "./crewMessages";
 import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
 import { NotificationCategory } from "./push";
@@ -642,7 +643,13 @@ export const getGroup = onCall({ enforceAppCheck: true }, async (request) => {
   // Membership check (throws failed-precondition for non-members)
   memberNameForUid(snap.data()!, uid);
 
-  const data = await maybeProcessDay(group_id, snap.data()!);
+  // Someone is looking at this city: that is presence (presence.ts). Runs
+  // alongside day processing; throttled inside so Home's one-call-per-city
+  // foreground refresh doesn't fan out into writes.
+  const [data] = await Promise.all([
+    maybeProcessDay(group_id, snap.data()!),
+    touchLastSeen(uid),
+  ]);
   return groupToResponse(group_id, data);
 });
 
@@ -823,6 +830,12 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   // "Teammate completed" push → nudge the crew members who still haven't
   // finished today (the pressure's on them). Best-effort, after the write.
   if (completedName) {
+    // A completion is the strongest presence signal there is, and its local
+    // time is the data the personal-send-time reminders will be built on.
+    await touchLastSeen(uid, {
+      force: true,
+      completionMinutes: localMinutesOf(new Date(), finalData!.goal_reset_timezone ?? "UTC"),
+    });
     const done: string[] = finalData!.completions_today ?? [];
     // The roster for today is the ACTIVE members — someone on vacation is
     // neither nudged nor waited for.

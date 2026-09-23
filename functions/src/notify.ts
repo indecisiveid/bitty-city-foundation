@@ -1,6 +1,6 @@
 /**
  * Notification glue: turn "notify these members of this group" into "send to
- * these Expo tokens, then prune the dead ones".
+ * these FCM tokens, then prune the dead ones".
  *
  * Push tokens live on `users/{uid}.push_tokens` (an array — a person can be
  * signed in on several devices). Group state is name-keyed
@@ -31,14 +31,21 @@ export function uidsForNames(
   return out;
 }
 
-/** Read push tokens for a set of uids, returning token→uid so we can prune. */
-async function tokensForUids(uids: string[]): Promise<Map<string, string>> {
-  const tokenToUid = new Map<string, string>();
-  if (uids.length === 0) return tokenToUid;
+export type UserSnap = FirebaseFirestore.DocumentSnapshot;
 
-  const snaps = await db().getAll(
-    ...uids.map((uid) => db().collection("users").doc(uid)),
-  );
+/** Load `users/{uid}` docs in one round-trip, keyed by uid (missing docs included, `exists` false). */
+export async function loadUsers(uids: string[]): Promise<Map<string, UserSnap>> {
+  const out = new Map<string, UserSnap>();
+  const unique = [...new Set(uids)];
+  if (unique.length === 0) return out;
+  const snaps = await db().getAll(...unique.map((uid) => db().collection("users").doc(uid)));
+  for (const snap of snaps) out.set(snap.id, snap);
+  return out;
+}
+
+/** Push tokens across a set of user docs, as token→uid so we can prune. */
+function tokensFromSnaps(snaps: Iterable<UserSnap>): Map<string, string> {
+  const tokenToUid = new Map<string, string>();
   for (const snap of snaps) {
     if (!snap.exists) continue;
     const tokens: string[] = snap.data()?.push_tokens ?? [];
@@ -49,7 +56,7 @@ async function tokensForUids(uids: string[]): Promise<Map<string, string>> {
   return tokenToUid;
 }
 
-/** Remove tokens Expo rejected (DeviceNotRegistered) from their user docs. */
+/** Remove tokens FCM rejected (not registered / invalid) from their user docs. */
 async function pruneTokens(
   invalid: string[],
   tokenToUid: Map<string, string>,
@@ -73,16 +80,26 @@ async function pruneTokens(
   );
 }
 
+/** Send a payload to already-loaded user docs (dedup across devices), then prune. */
+export async function notifySnaps(snaps: UserSnap[], payload: PushPayload): Promise<void> {
+  try {
+    const tokenToUid = tokensFromSnaps(snaps);
+    if (tokenToUid.size === 0) return;
+    const invalid = await sendPush([...tokenToUid.keys()], payload);
+    await pruneTokens(invalid, tokenToUid);
+  } catch (err) {
+    console.error("[notify] notifySnaps failed", err);
+  }
+}
+
 /** Send a payload to a set of uids (dedup across their devices), then prune. */
 export async function notifyUids(
   uids: string[],
   payload: PushPayload,
 ): Promise<void> {
   try {
-    const tokenToUid = await tokensForUids([...new Set(uids)]);
-    if (tokenToUid.size === 0) return;
-    const invalid = await sendPush([...tokenToUid.keys()], payload);
-    await pruneTokens(invalid, tokenToUid);
+    const users = await loadUsers(uids);
+    await notifySnaps([...users.values()], payload);
   } catch (err) {
     console.error("[notify] notifyUids failed", err);
   }
