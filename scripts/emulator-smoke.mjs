@@ -219,6 +219,10 @@ function zoneInSlot(slotMinutes) {
   return signed === 0 ? 'Etc/GMT' : `Etc/GMT${signed > 0 ? '-' : '+'}${Math.abs(signed)}`;
 }
 const SLOT = { morning: 8 * 60, midday: 11 * 60 + 30, evening: 17 * 60 + 30, lastCall: 21 * 60 };
+/** Today's YYYY-MM-DD on the wall clock of an IANA zone. */
+function localYmd(zone) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
 /** The late slot (evening/lastCall) and the early slot (morning/midday) reachable this minute. */
 function reachableSlots() {
   const late = new Date().getUTCMinutes() >= 30 ? 'evening' : 'lastCall';
@@ -1107,7 +1111,16 @@ async function main() {
     { group_name: 'Dormant Town', member: 'Bob', daily_goal: 'Walk', goal_reset_time: '00:00', goal_reset_timezone: lateZone },
     bob,
   )).result;
-  await adminPatch(`groups/${dormantCity.group_id}`, { streak: { integerValue: '3' } }, ['streak']);
+  // Seed a live streak (last call for a solo city only fires while one is at
+  // stake) AND mark today as already settled: the tick runs day rollover
+  // first, and a never-processed city would be settled on the spot, which
+  // recomputes the streak from an empty completions log — back to 0 — before
+  // the nudge pass ever looks at it.
+  await adminPatch(
+    `groups/${dormantCity.group_id}`,
+    { streak: { integerValue: '3' }, last_processed_date: { stringValue: localYmd(lateZone) } },
+    ['streak', 'last_processed_date'],
+  );
   await adminPatch(
     `users/${bob.uid}`,
     { last_seen_at: { timestampValue: new Date(Date.now() - 20 * 86400000).toISOString() } },
