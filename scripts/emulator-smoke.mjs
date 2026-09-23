@@ -407,6 +407,26 @@ async function main() {
   check('landing fires build_complete', lastDone.result?.pending_event?.type === 'build_complete', JSON.stringify(lastDone.result?.pending_event));
   check('landing earns a freeze', lastDone.result?.streak_freezes === 2, `freezes=${lastDone.result?.streak_freezes}`);
   check('landed_on is today', lastDone.result?.landed_on === lastDone.result?.proofs_today?.date, JSON.stringify(lastDone.result?.landed_on));
+  // Bricks: every member is paid for the landing, once, by the build's
+  // day cost — then the shop turns them into hard hats for this city.
+  const bricksOf = async (u) => Number((await readDoc(`users/${u.uid}`, u)).body?.fields?.bricks?.integerValue ?? 0);
+  const devBricks = await bricksOf(dev);
+  const bobBricks = await bricksOf(bob);
+  check('landing pays the crew 10 bricks for a 1-day build', devBricks >= 10 && bobBricks >= 10, `dev=${devBricks} bob=${bobBricks}`);
+  const devLedger = (await readDoc(`users/${dev.uid}`, dev)).body?.fields?.brick_ledger?.arrayValue?.values ?? [];
+  check('landing is in the brick ledger once', devLedger.filter((v) => v.mapValue?.fields?.event_id?.stringValue === lastDone.result?.pending_event?.event_id).length === 1, JSON.stringify(devLedger).slice(0, 200));
+  await adminPatch(`users/${dev.uid}`, { bricks: { integerValue: '50' } }, ['bricks']);
+  const poor = await call('buyHardHats', { group_id: lg.group_id, count: 1 }, dev);
+  check('buyHardHats refuses when bricks are short', poor.error === 'FAILED_PRECONDITION', JSON.stringify(poor).slice(0, 200));
+  await adminPatch(`users/${dev.uid}`, { bricks: { integerValue: '100' } }, ['bricks']);
+  const bought = await call('buyHardHats', { group_id: lg.group_id, count: 5 }, dev);
+  check('buyHardHats clamps to the empty slots and fills to the cap', bought.result?.streak_freezes === 3, `freezes=${bought.result?.streak_freezes} ${JSON.stringify(bought).slice(0, 160)}`);
+  check('buyHardHats debits one hat', bought.result?.bricks === 40, `bricks=${bought.result?.bricks}`);
+  check('buyHardHats writes a refill event', bought.result?.last_freeze_event?.kind === 'refill' && bought.result?.last_freeze_event?.days === 1, JSON.stringify(bought.result?.last_freeze_event));
+  const full = await call('buyHardHats', { group_id: lg.group_id, count: 1 }, dev);
+  check('buyHardHats refuses when full', full.error === 'FAILED_PRECONDITION', JSON.stringify(full).slice(0, 160));
+  const stranger = await call('buyHardHats', { group_id: lg.group_id, count: 1 }, eve);
+  check('buyHardHats requires membership', stranger.error === 'FAILED_PRECONDITION', JSON.stringify(stranger).slice(0, 120));
   const secondPick = await call('selectBuild', { group_id: lg.group_id, type: 'house' }, dev);
   check('no second build the same day', secondPick.error === 'FAILED_PRECONDITION', JSON.stringify(secondPick));
   await adminPatch(

@@ -55,8 +55,47 @@ import {
 } from "./gameMode";
 import { easyModeSuggestionMessage } from "./crewMessages";
 import { proofsBucket, proofObjectSize, deleteProofObject, deleteProofPrefix } from "./proofStorage";
+import { applyBrickEntry, bricksForLanding } from "./bricks";
 
 const db = () => getFirestore();
+
+/**
+ * Pay every member of the city for a landing. Bricks are personal, so this
+ * is one small transaction per wallet; the landing's event id is the
+ * idempotency key, so the settlement fallback and completeGoal can both
+ * pass through here for the same landing and it pays once. Best-effort:
+ * a wallet write failing never fails the landing that earned it.
+ */
+export async function grantLandingBricks(
+  groupId: string,
+  data: FirebaseFirestore.DocumentData,
+  event: { event_id?: string; type?: string; building?: string } | null | undefined,
+): Promise<void> {
+  if (!event || event.type !== "build_complete" || !event.event_id) return;
+  const amount = bricksForLanding(daysFor(event.building ?? ""));
+  const uids: string[] = data.member_uids ?? [];
+  const at = new Date().toISOString();
+  await Promise.all(
+    uids.map(async (uid) => {
+      const ref = db().collection("users").doc(uid);
+      try {
+        await db().runTransaction(async (tx) => {
+          const snap = await tx.get(ref);
+          const next = applyBrickEntry(snap.exists ? snap.data()! : null, {
+            event_id: event.event_id!,
+            amount,
+            reason: "landing",
+            group_id: groupId,
+            at,
+          });
+          if (next) tx.set(ref, next, { merge: true });
+        });
+      } catch (e) {
+        console.error(`bricks: grant to ${uid} for ${event.event_id} failed`, e);
+      }
+    }),
+  );
+}
 
 /** Drop one member from a name-keyed proof bucket. */
 function withoutEntry(entries: Record<string, unknown> | null | undefined, name: string): Record<string, unknown> {
@@ -322,6 +361,7 @@ export async function maybeProcessDay(
     | { type?: string; building?: string; restored?: boolean }
     | undefined;
   if (event?.type === "build_complete") {
+    await grantLandingBricks(groupId, merged, writeUpdates.pending_event as { event_id?: string; type?: string; building?: string });
     const label = labelFor(event.building ?? "");
     await notifyAllMembers(
       groupId,
@@ -361,8 +401,8 @@ export async function maybeProcessDay(
         // so the push would promise what their app can't do. Name it again
         // once every install has the stall sheet that offers it.
         mode === "hard"
-          ? `${why} No freezes left. Open the city today to see your options.`
-          : `${why} No freezes left. Pick a new build.`,
+          ? `${why} No hard hats left. Open the city today to see your options.`
+          : `${why} No hard hats left. Pick a new build.`,
     });
   }
 
@@ -832,6 +872,11 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     };
   });
 
+  // The landing pays the crew. After the write, keyed by the event id.
+  if (landedBuild) {
+    await grantLandingBricks(group_id, finalData!, finalData!.pending_event);
+  }
+
   // "Teammate completed" push → nudge the crew members who still haven't
   // finished today (the pressure's on them). Best-effort, after the write.
   if (completedName) {
@@ -1233,7 +1278,7 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
     if (!rescued) {
       throw new HttpsError(
         "failed-precondition",
-        "There's no stalled build to rescue, or no streak freeze to spend",
+        "There's no stalled build to rescue, or no hard hat to use",
       );
     }
 
@@ -1249,8 +1294,8 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
       group_id,
       finalData!,
       {
-        title: `🧊 The ${label} build is back on`,
-        body: `${rescuerName} spent a streak freeze to save it. Finish today's goal to keep it moving.`,
+        title: `🪖 The ${label} build is back on`,
+        body: `${rescuerName} used a hard hat to save it. Finish today's goal to keep it moving.`,
       },
       rescuerName,
     );
@@ -1361,8 +1406,8 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
       {
         title: `🧊 ${restoredValue}-day streak repaired`,
         body: label
-          ? `${repairerName} spent a streak freeze to bring back your streak and your ${label} build. Finish today's goal to keep it moving.`
-          : `${repairerName} spent a streak freeze to bring back your streak.`,
+          ? `${repairerName} used a hard hat to bring back your streak and your ${label} build. Finish today's goal to keep it moving.`
+          : `${repairerName} used a hard hat to bring back your streak.`,
       },
       repairerName,
     );
@@ -1373,7 +1418,7 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
 
 const REPAIR_BLOCKER_MESSAGES: Record<StreakRepairBlocker, string> = {
   nothing_to_repair: "There's no recently broken streak to repair",
-  no_freeze: "Repairing a streak costs a streak freeze — land a building to earn one",
+  no_freeze: "Repairing a streak takes a hard hat — land a building to earn one",
   build_in_progress: "Finish the current build first — the repair brings your lost build back",
   landed_today: "Your city grew today — repair it tomorrow",
 };

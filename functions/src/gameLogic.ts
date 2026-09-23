@@ -194,9 +194,10 @@ function lostBuildFrom(b: AbandonedBuild): LostBuild {
 //   repair  a member spent one on a broken streak
 //   switch  the crew switched to easy mode to save a stalled build; no
 //           freeze was spent, but the missed day was still bridged
+//   refill  a member bought hard hats with bricks (`days` = how many)
 // ---------------------------------------------------------------------------
 
-export type FreezeEventKind = "auto" | "rescue" | "repair" | "switch";
+export type FreezeEventKind = "auto" | "rescue" | "repair" | "switch" | "refill";
 
 export interface FreezeEvent {
   /** Settlement label of the (first) day the freeze covered. */
