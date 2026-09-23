@@ -22,6 +22,7 @@ import {
   rowMajorBuildOrder,
   FREEZE_CAP,
   CityMap,
+  countBuildings,
 } from "../gameLogic";
 
 const TODAY = "2026-05-04";
@@ -1345,5 +1346,24 @@ describe("applyStreakRepair — vacation mode", () => {
       "2026-05-04",
     ]);
     expect(result?.streak).toBe(2);
+  });
+});
+
+describe("countBuildings — the number tier unlocks are measured against", () => {
+  it("counts standing cells, skips rubble and empties, adds one per park", () => {
+    const cityMap = {
+      "0": ["house_a", null, "rubble", "apartment_c"],
+      "1": [null, "skyscraper", null, null],
+    };
+    expect(countBuildings(cityMap, null)).toBe(3);
+    expect(countBuildings(cityMap, [])).toBe(3);
+    // A 15-lot park is still one building.
+    expect(countBuildings(cityMap, [{ park_id: "p1" }, { park_id: "p2" }])).toBe(5);
+  });
+
+  it("survives a missing or malformed map", () => {
+    expect(countBuildings({} as any, undefined)).toBe(0);
+    expect(countBuildings(undefined as any, undefined)).toBe(0);
+    expect(countBuildings({ "0": "nope" } as any, undefined)).toBe(0);
   });
 });

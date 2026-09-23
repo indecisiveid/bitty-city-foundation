@@ -502,6 +502,25 @@ export function damagePark(
 // findEmptyTiles — dimension-agnostic, mirrors Python `_find_empty_tiles`
 // ---------------------------------------------------------------------------
 
+/**
+ * How many buildings the city holds — the number the app's header shows and
+ * the one tier unlocks are measured against (`buildCatalog.TIER_MIN_BUILDINGS`).
+ *
+ * Mirrors `mobile/src/api/cityMap.countBuildings`: a standing cell counts,
+ * rubble doesn't, and a park is ONE building however many lots it covers
+ * (its cells are null in `city_map` by design, so it is counted from `parks`).
+ */
+export function countBuildings(cityMap: CityMap, parks: readonly unknown[] | null | undefined): number {
+  let count = 0;
+  for (const row of Object.values(cityMap ?? {})) {
+    if (!Array.isArray(row)) continue;
+    for (const cell of row) {
+      if (cell !== null && cell !== undefined && cell !== "rubble") count++;
+    }
+  }
+  return count + (Array.isArray(parks) ? parks.length : 0);
+}
+
 export function findEmptyTiles(cityMap: CityMap): number[][] {
   const tiles: number[][] = [];
   for (const [rStr, row] of Object.entries(cityMap)) {

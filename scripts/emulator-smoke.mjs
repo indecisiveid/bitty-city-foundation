@@ -985,6 +985,33 @@ async function main() {
   check('createGroup rejects an unknown mode', badMode.error === 'INVALID_ARGUMENT', JSON.stringify(badMode));
 
   await call('joinGroup', { group_code: easyCity.group_code, member: 'Bob' }, bob);
+
+  console.log('— tier unlocks —');
+  // Bigger builds wait for a bigger city: medium at 10 buildings, challenge
+  // at 20. The picker hides locked tiers; the server is the authority, and
+  // the legacy names a 1.1 client sends obey the same thresholds.
+  const lockedMedium = await call('selectBuild', { group_id: easyCity.group_id, type: 'apartment_c' }, dev);
+  check('empty city: medium build refused', lockedMedium.error === 'FAILED_PRECONDITION', JSON.stringify(lockedMedium));
+  check('refusal names the threshold', /10 buildings/.test(lockedMedium.message ?? ''), lockedMedium.message);
+  const lockedLegacy = await call('selectBuild', { group_id: easyCity.group_id, type: 'skyscraper' }, dev);
+  check('empty city: legacy skyscraper refused too', lockedLegacy.error === 'FAILED_PRECONDITION', JSON.stringify(lockedLegacy));
+  const easyOk = await call('selectBuild', { group_id: easyCity.group_id, type: 'house_b' }, dev);
+  check('empty city: easy build allowed', easyOk.result?.current_build?.type === 'house_b', JSON.stringify(easyOk).slice(0, 200));
+  // demoSetBuildings rebuilds the map AND clears the build slot.
+  await call('demoSetBuildings', { group_id: easyCity.group_id, count: 9 }, dev);
+  const nineLocked = await call('selectBuild', { group_id: easyCity.group_id, type: 'apartment_c' }, dev);
+  check('9 buildings: medium still locked', nineLocked.error === 'FAILED_PRECONDITION', JSON.stringify(nineLocked));
+  check('9 buildings: 1 to go', /1 to go/.test(nineLocked.message ?? ''), nineLocked.message);
+  await call('demoSetBuildings', { group_id: easyCity.group_id, count: 10 }, dev);
+  const tenChallenge = await call('selectBuild', { group_id: easyCity.group_id, type: 'park_large' }, dev);
+  check('10 buildings: challenge still locked', tenChallenge.error === 'FAILED_PRECONDITION', JSON.stringify(tenChallenge));
+  await call('demoSetBuildings', { group_id: easyCity.group_id, count: 20 }, dev);
+  const twentyChallenge = await call('selectBuild', { group_id: easyCity.group_id, type: 'skyscraper_twin' }, dev);
+  check('20 buildings: challenge allowed', twentyChallenge.result?.current_build?.type === 'skyscraper_twin', JSON.stringify(twentyChallenge).slice(0, 200));
+  // Back to 10 for the easy-mode section: medium is open, and the map has
+  // room for what follows.
+  await call('demoSetBuildings', { group_id: easyCity.group_id, count: 10 }, dev);
+
   // Easy mode: one of two completes → half a day banked, streak counts it.
   await call('selectBuild', { group_id: easyCity.group_id, type: 'apartment_c' }, dev);
   await call('completeGoal', { group_id: easyCity.group_id }, dev);

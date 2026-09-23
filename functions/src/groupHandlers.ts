@@ -14,6 +14,7 @@ import {
   applyBuildRescue,
   isFirstDayGrace,
   findEmptyTiles,
+  countBuildings,
   landBuild,
   STARTING_FREEZES,
   rowMajorBuildOrder,
@@ -36,7 +37,7 @@ import { joinedMessage, leftMessage } from "./crewMessages";
 import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
 import { NotificationCategory } from "./push";
 import { buildProgressOf, withArticle } from "./buildings";
-import { isBuildable, buildableIds, daysFor, labelFor } from "./buildCatalog";
+import { isBuildable, buildableIds, daysFor, labelFor, minBuildingsFor } from "./buildCatalog";
 import { isProofKeyFor, applyProof, ProofEntry, MAX_PROOF_BYTES } from "./proofs";
 import {
   GameMode,
@@ -919,6 +920,21 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
     const hasEmpty = findEmptyTiles(freshData.city_map).length > 0;
     if (!hasEmpty) {
       throw new HttpsError("failed-precondition", "City is full — no empty tiles");
+    }
+
+    // Tier unlock: bigger builds wait for a bigger city. The picker already
+    // hides locked tiers, so this is for stale clients (1.1 sends
+    // 'skyscraper' and has no picker lock at all) and for a city that shrank
+    // under an open sheet. Read inside the transaction so the count is the
+    // same one the write is conditioned on.
+    const needed = minBuildingsFor(type) ?? 0;
+    const have = countBuildings(freshData.city_map, normalizeParks(freshData.parks));
+    if (have < needed) {
+      throw new HttpsError(
+        "failed-precondition",
+        `${labelFor(type)} unlocks once your city has ${needed} buildings — ${needed - have} to go`,
+        { reason: "tier_locked", needed, have },
+      );
     }
 
     const newBuild = {

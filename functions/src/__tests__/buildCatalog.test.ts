@@ -9,6 +9,9 @@ import {
   buildableIds,
   isCatalogId,
   LEGACY_DAYS,
+  TIER_MIN_BUILDINGS,
+  tierFor,
+  minBuildingsFor,
 } from "../buildCatalog";
 
 describe("build catalog", () => {
@@ -48,6 +51,20 @@ describe("build catalog", () => {
     expect(labelFor("spaceport")).toBe("building");
   });
 
+  it("gates every startable id behind its tier's city size", () => {
+    expect(TIER_MIN_BUILDINGS).toEqual({ easy: 0, medium: 10, challenge: 20 });
+    expect(minBuildingsFor("house_a")).toBe(0);
+    expect(minBuildingsFor("apartment_c")).toBe(10);
+    expect(minBuildingsFor("tenement_g")).toBe(20);
+    expect(minBuildingsFor("park_large")).toBe(20);
+    // The 1.1 client has no picker lock and still sends the old names; they
+    // must obey the same thresholds or the gate has a hole in it.
+    expect(tierFor("house")).toBe("easy");
+    expect(minBuildingsFor("apartment")).toBe(10);
+    expect(minBuildingsFor("skyscraper")).toBe(20);
+    expect(minBuildingsFor("spaceport")).toBeUndefined();
+  });
+
   it("rejects junk without throwing", () => {
     for (const junk of [undefined, null, 42, {}, []]) {
       expect(isBuildable(junk)).toBe(false);
@@ -72,22 +89,32 @@ describe("parity with the app catalog", () => {
   const available = fs.existsSync(appCatalogPath);
   const maybe = available ? it : it.skip;
 
-  maybe("agrees on every id and day cost", () => {
+  maybe("agrees on every id, day cost and tier", () => {
     const src = fs.readFileSync(appCatalogPath, "utf8");
-    // Pull `id: 'x'` / `days: N` pairs straight out of the app's CATALOG.
-    const app = new Map<string, number>();
+    // Pull `id: 'x'` / `tier: 't'` / `days: N` straight out of the app's CATALOG.
+    const app = new Map<string, string>();
     for (const line of src.split("\n")) {
       const id = line.match(/id:\s*'([^']+)'/);
+      const tier = line.match(/tier:\s*'([^']+)'/);
       const days = line.match(/days:\s*(\d+)/);
-      if (id && days) app.set(id[1], Number(days[1]));
+      if (id && tier && days) app.set(id[1], `${tier[1]}:${days[1]}`);
     }
     expect(app.size).toBeGreaterThan(0);
 
-    const server = new Map(CATALOG.map((i) => [i.id, i.days as number]));
+    const server = new Map(CATALOG.map((i) => [i.id, `${i.tier}:${i.days}`]));
     expect([...server.keys()].sort()).toEqual([...app.keys()].sort());
-    for (const [id, days] of server) {
-      expect(`${id}:${app.get(id)}`).toBe(`${id}:${days}`);
+    for (const [id, shape] of server) {
+      expect(`${id}=${app.get(id)}`).toBe(`${id}=${shape}`);
     }
+  });
+
+  maybe("agrees on the unlock thresholds", () => {
+    const src = fs.readFileSync(appCatalogPath, "utf8");
+    const block = src.match(/TIER_MIN_BUILDINGS[^=]*=\s*\{([^}]*)\}/);
+    expect(block).not.toBeNull();
+    const app: Record<string, number> = {};
+    for (const m of block![1].matchAll(/(\w+):\s*(\d+)/g)) app[m[1]] = Number(m[2]);
+    expect(app).toEqual(TIER_MIN_BUILDINGS);
   });
 
   if (!available) {

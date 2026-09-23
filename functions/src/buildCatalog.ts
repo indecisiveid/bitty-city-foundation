@@ -7,15 +7,20 @@
  * own catalog test on the other — same discipline as
  * `gameLogic.computeStreakWithFreezes` ↔ `utils/streak.ts`.
  *
- * The server only ever needs three things from an item: does it exist, how
- * many days does it cost, and what do we call it in a push. Tier is a
- * client-side presentation concept and is deliberately absent here.
+ * The server needs four things from an item: does it exist, how many days
+ * does it cost, what do we call it in a push, and which TIER it sits in —
+ * because tiers unlock with city size (`TIER_MIN_BUILDINGS`) and
+ * `selectBuild` is where that rule is actually enforced. The picker hides a
+ * locked tier; the server refuses it, so an old or modified client can't
+ * start a skyscraper on day one.
  */
 
 export type BuildDays = 1 | 3 | 5 | 7;
+export type BuildTier = "easy" | "medium" | "challenge";
 
 export interface CatalogItem {
   id: string;
+  tier: BuildTier;
   label: string;
   days: BuildDays;
   kind: "building" | "park";
@@ -24,24 +29,35 @@ export interface CatalogItem {
 }
 
 export const CATALOG: CatalogItem[] = [
-  { id: "house_a", label: "Cottage", days: 1, kind: "building" },
-  { id: "house_b", label: "Townhouse", days: 1, kind: "building" },
+  { id: "house_a", tier: "easy", label: "Cottage", days: 1, kind: "building" },
+  { id: "house_b", tier: "easy", label: "Townhouse", days: 1, kind: "building" },
 
-  { id: "apartment_e", label: "Corner Shop", days: 3, kind: "building" },
-  { id: "apartment_f", label: "Row House", days: 3, kind: "building" },
-  { id: "apartment_c", label: "Apartments", days: 3, kind: "building" },
-  { id: "apartment_d", label: "Brownstone", days: 3, kind: "building" },
+  { id: "apartment_e", tier: "medium", label: "Corner Shop", days: 3, kind: "building" },
+  { id: "apartment_f", tier: "medium", label: "Row House", days: 3, kind: "building" },
+  { id: "apartment_c", tier: "medium", label: "Apartments", days: 3, kind: "building" },
+  { id: "apartment_d", tier: "medium", label: "Brownstone", days: 3, kind: "building" },
 
-  { id: "tenement_g", label: "Tenement", days: 5, kind: "building" },
-  { id: "highrise_h", label: "High Rise", days: 5, kind: "building" },
-  { id: "park_small", label: "Park", days: 5, kind: "park", cells: 9 },
+  { id: "tenement_g", tier: "challenge", label: "Tenement", days: 5, kind: "building" },
+  { id: "highrise_h", tier: "challenge", label: "High Rise", days: 5, kind: "building" },
+  { id: "park_small", tier: "challenge", label: "Park", days: 5, kind: "park", cells: 9 },
 
-  { id: "skyscraper_slim", label: "Skyscraper", days: 7, kind: "building" },
-  { id: "skyscraper_twin", label: "Twin Towers", days: 7, kind: "building" },
-  { id: "park_large", label: "Grand Park", days: 7, kind: "park", cells: 15 },
+  { id: "skyscraper_slim", tier: "challenge", label: "Skyscraper", days: 7, kind: "building" },
+  { id: "skyscraper_twin", tier: "challenge", label: "Twin Towers", days: 7, kind: "building" },
+  { id: "park_large", tier: "challenge", label: "Grand Park", days: 7, kind: "park", cells: 15 },
 ];
 
 const BY_ID = new Map(CATALOG.map((i) => [i.id, i]));
+
+/**
+ * City-wide building count (standing buildings + parks, rubble excluded — see
+ * `gameLogic.countBuildings`) a city needs before a tier may be STARTED.
+ * Mirrors the app's `TIER_MIN_BUILDINGS`; the parity test pins both.
+ */
+export const TIER_MIN_BUILDINGS: Record<BuildTier, number> = {
+  easy: 0,
+  medium: 10,
+  challenge: 20,
+};
 
 /**
  * Day costs for the vocabulary v1.0 shipped with.
@@ -65,6 +81,16 @@ export const LEGACY_LABEL: Record<string, string> = {
   house: "House",
   apartment: "Apartment",
   skyscraper: "Skyscraper",
+};
+
+/**
+ * The v1.0 vocabulary's tiers. A 1.1 client can still send `skyscraper`;
+ * without this it would walk straight past the unlock the catalog ids obey.
+ */
+export const LEGACY_TIER: Record<string, BuildTier> = {
+  house: "easy",
+  apartment: "medium",
+  skyscraper: "challenge",
 };
 
 /** A current-vocabulary catalog id. */
@@ -103,6 +129,16 @@ export function labelFor(id: string): string {
 
 export function itemFor(id: string): CatalogItem | undefined {
   return BY_ID.get(id);
+}
+
+export function tierFor(id: string): BuildTier | undefined {
+  return BY_ID.get(id)?.tier ?? LEGACY_TIER[id];
+}
+
+/** Buildings a city must already hold to start `id`. Unknown ids: undefined. */
+export function minBuildingsFor(id: string): number | undefined {
+  const tier = tierFor(id);
+  return tier === undefined ? undefined : TIER_MIN_BUILDINGS[tier];
 }
 
 /** Ids a client may pass to `selectBuild`, for the error message. */
