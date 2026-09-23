@@ -13,9 +13,10 @@ import {
 } from "../reminderLogic";
 import { INACTIVITY_METEOR_DAYS } from "../gameLogic";
 import { isValidPushToken } from "../push";
-import { buildProgressOf, withArticle } from "../buildings";
+import { buildProgressOf, landingTodayLabel, withArticle } from "../buildings";
 import { CATALOG, LEGACY_LABEL } from "../buildCatalog";
 import { messageFor } from "../scheduled";
+import { farewellMessage } from "../nudgeMessages";
 import { dayCompleteMessage } from "../groupHandlers";
 
 /** Minutes-since-midnight for a slot id. */
@@ -69,7 +70,7 @@ describe("decideNudge", () => {
     expect(decideNudge({ ...base, localMinutes: 14 * 60 })).toBeNull();
   });
 
-  it("fires each of the four slots on the same day", () => {
+  it("fires each of the four slots on the same day for a crew", () => {
     const slots: SlotId[] = ["morning", "midday", "evening", "lastCall"];
     const sent: SlotId[] = [];
     for (const id of slots) {
@@ -481,5 +482,164 @@ describe("messageFor — the last-call chaser", () => {
       const n = { kind: "streak" as const, recipients: "incomplete" as const, slot };
       expect(messageFor(n, ctx, "done").body).toBe(messageFor(n, ctx).body);
     }
+  });
+});
+
+/**
+ * Solo cities. The four-slot ladder is a crew mechanic — plan, nag, chase,
+ * last call. To one person it is the same reminder four times, and 7 of the 9
+ * cities real users founded were solo. So: evening once, last call only when
+ * a live streak is at stake, and the meteor whenever it is due.
+ */
+describe("decideNudge — solo city", () => {
+  const solo: NudgeInput = { ...base, memberCount: 1, completedCount: 0 };
+
+  it("says nothing in the morning or at midday", () => {
+    expect(decideNudge({ ...solo, localMinutes: at("morning") })).toBeNull();
+    expect(decideNudge({ ...solo, localMinutes: at("midday") })).toBeNull();
+    // …even with a streak on the line: evening will say so.
+    expect(decideNudge({ ...solo, streak: 5, localMinutes: at("midday") })).toBeNull();
+  });
+
+  it("sends the one evening reminder, streak or not", () => {
+    expect(decideNudge({ ...solo, localMinutes: at("evening") })).toEqual({
+      kind: "reminder",
+      recipients: "incomplete",
+      slot: "evening",
+    });
+    expect(decideNudge({ ...solo, streak: 5, localMinutes: at("evening") })?.kind).toBe("streak");
+  });
+
+  it("adds last call only while a streak is at stake", () => {
+    expect(decideNudge({ ...solo, localMinutes: at("lastCall") })).toBeNull();
+    expect(decideNudge({ ...solo, streak: 2, localMinutes: at("lastCall") })).toEqual({
+      kind: "streak",
+      recipients: "all",
+      slot: "lastCall",
+    });
+  });
+
+  it("still warns about the meteor at any slot", () => {
+    for (const slot of ["morning", "midday", "evening", "lastCall"] as SlotId[]) {
+      const n = decideNudge({ ...solo, localMinutes: at(slot), idleDays: INACTIVITY_METEOR_DAYS - 1 });
+      expect(n?.kind).toBe("meteor");
+    }
+  });
+
+  it("is quiet once the solo member is done", () => {
+    expect(decideNudge({ ...solo, completedCount: 1, localMinutes: at("evening") })).toBeNull();
+  });
+
+  it("a crew of two keeps the full ladder", () => {
+    const duo = { ...base, memberCount: 2, completedCount: 0 };
+    expect(decideNudge({ ...duo, localMinutes: at("morning") })).not.toBeNull();
+    expect(decideNudge({ ...duo, localMinutes: at("midday") })).not.toBeNull();
+    expect(decideNudge({ ...duo, localMinutes: at("lastCall") })).not.toBeNull();
+  });
+});
+
+describe("messageFor — naming the friend and the stake", () => {
+  const ctx = { cityName: "Amitopolis", streak: 3, build: null, pendingNames: ["Amit"] };
+  const evening = { kind: "streak" as const, recipients: "incomplete" as const, slot: "evening" as const };
+
+  it("leads with who already checked in when the recipient is the last one", () => {
+    const m = messageFor(evening, { ...ctx, completedNames: ["Jennifer"] });
+    expect(m.body.startsWith("Jennifer already checked in — you're the last one. ")).toBe(true);
+    expect(m.body).toContain("3-day streak");
+  });
+
+  it("counts the others still to go when several are pending", () => {
+    const m = messageFor(evening, {
+      ...ctx,
+      pendingNames: ["Amit", "Sam", "Riley"],
+      completedNames: ["Jennifer", "Dee"],
+    });
+    expect(m.body).toContain("Jennifer and Dee already checked in. 3 still to go.");
+  });
+
+  it("truncates a long list of finished members", () => {
+    const m = messageFor(evening, { ...ctx, completedNames: ["A", "B", "C", "D"] });
+    expect(m.body).toContain("A and 3 others already checked in");
+  });
+
+  it("says nothing about the crew when nobody has finished", () => {
+    const m = messageFor(evening, { ...ctx, completedNames: [] });
+    expect(m.body.startsWith("Today's goal in Amitopolis")).toBe(true);
+  });
+
+  it("names the build that lands tonight, on every reminder slot", () => {
+    for (const slot of ["morning", "midday", "evening", "lastCall"] as SlotId[]) {
+      const m = messageFor({ ...evening, slot }, { ...ctx, landsToday: "Cottage" });
+      expect(m.body).toContain("Finish today and your Cottage lands tonight.");
+    }
+  });
+
+  it("does not attach the landing clause to the meteor or the chaser", () => {
+    expect(
+      messageFor({ kind: "meteor", recipients: "all", slot: "evening" }, { ...ctx, landsToday: "Cottage" }).body,
+    ).not.toContain("lands tonight");
+    expect(
+      messageFor(
+        { kind: "streak", recipients: "all", slot: "lastCall" },
+        { ...ctx, landsToday: "Cottage", completedNames: ["Jennifer"] },
+        "done",
+      ).body,
+    ).not.toContain("lands tonight");
+  });
+
+  it("still never sends the same body twice in a day, whatever the crew has done", () => {
+    const slots: SlotId[] = ["morning", "midday", "evening", "lastCall"];
+    const build = { label: "Apartment", dayNumber: 2, daysRequired: 3 };
+    for (const kind of ["streak", "reminder"] as const) {
+      for (const b of [null, build]) {
+        for (const completedNames of [[], ["Jennifer"], ["Jennifer", "Dee"]]) {
+          for (const landsToday of [null, "Apartment"]) {
+            const bodies = slots.map(
+              (slot) =>
+                messageFor(
+                  { kind, recipients: "incomplete", slot },
+                  { ...ctx, build: b, completedNames, landsToday },
+                ).body,
+            );
+            expect(new Set(bodies).size).toBe(slots.length);
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("landingTodayLabel", () => {
+  it("names a single-day build — the stake a fresh solo city has", () => {
+    expect(landingTodayLabel({ type: "house_a", days_required: 1, days_completed: 0 })).toBe("Cottage");
+  });
+
+  it("names a multi-day build only on its last day", () => {
+    expect(landingTodayLabel({ type: "apartment_c", days_required: 3, days_completed: 1 })).toBeNull();
+    expect(landingTodayLabel({ type: "apartment_c", days_required: 3, days_completed: 2 })).not.toBeNull();
+    // Easy mode banks fractions: 2.5 of 3 lands today too.
+    expect(landingTodayLabel({ type: "apartment_c", days_required: 3, days_completed: 2.5 })).not.toBeNull();
+  });
+
+  it("is null with no build, and marks a restoration as one", () => {
+    expect(landingTodayLabel(null)).toBeNull();
+    expect(landingTodayLabel(undefined)).toBeNull();
+    expect(
+      landingTodayLabel({ type: "house_a", days_required: 1, days_completed: 0, target_tile: { row: 1, col: 2 } }),
+    ).toMatch(/restoration$/);
+  });
+});
+
+describe("farewellMessage", () => {
+  it("names one city, or speaks of cities", () => {
+    expect(farewellMessage(["Bitty Philly"]).body).toContain("Your city Bitty Philly will be waiting");
+    expect(farewellMessage(["A", "B"]).body).toContain("Your cities will be waiting");
+  });
+
+  it("states the fact and leaves the door open — no guilt, no countdown", () => {
+    const m = farewellMessage(["Bitty Philly"]);
+    expect(m.title).toContain("stop reminding");
+    expect(m.body).toContain("two weeks");
+    expect(m.body).not.toMatch(/streak|meteor|lose|last chance/i);
   });
 });

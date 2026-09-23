@@ -66,8 +66,11 @@ durable proof ledger, written by `completeGoal`, member-readable (the app's
 Photos live in Storage at `proofs/{groupId}/{uid}/{random}.jpg` behind
 `storage.rules` (member-read, own-uid create-only, jpeg ≤5 MiB).
 
-`group_codes/{CODE}` → `{group_id}`. `users/{uid}` → `{display_name,
-group_ids[]}` (cross-device restore + 100-groups cap).
+`group_codes/{CODE}` → `{group_id}`. `users/{uid}` → `{display_name, group_ids[], created_at, push_tokens[],
+last_seen_at, reminders: {date, sent, farewell_sent_at}, completion_minutes[]}` (cross-device restore + 100-groups cap; `last_seen_at` is presence,
+stamped by getGroup/registerPushToken/completeGoal — see `presence.ts`;
+`reminders` is the per-person send ledger the scheduler keeps — see
+`reminderTiers.ts`).
 
 ## Game rules (the parts that bite)
 
@@ -88,6 +91,14 @@ group_ids[]}` (cross-device restore + 100-groups cap).
   so one day's check-ins never land two buildings. Tiles are stamped with the
   GAME DAY the crew completed on (= the proof ledger key), not the settlement
   label.
+- **Reminders are per-city decisions, per-person deliveries.** `reminderLogic.ts`
+  decides what a CITY owes at each of four local slots (solo cities: evening
+  only, plus last call while a streak is live, plus the meteor any time).
+  `reminderTiers.ts` then gates each PERSON by `users/{uid}.last_seen_at`
+  (`presence.ts`): <7 days idle hears everything; 7–13 days hears one push a
+  day and only the late slots; ≥14 days gets one farewell and then silence
+  until they open the app. A missing stamp means unknown → active (never
+  farewell on a guess); `scripts/backfill-last-seen.mjs` seeds it from Auth.
 - **Day processing runs on the server clock**: the 30-minute scheduler
   (`scheduled.ts` → `runDayRollover`) settles every city whose boundary has
   passed, then decides nudges against the settled state. Callables still
