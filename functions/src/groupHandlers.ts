@@ -350,16 +350,13 @@ export async function maybeProcessDay(
     const mode = normalizeGameMode(merged.game_mode);
     // What a miss IS depends on the mode: hard stalls when anyone is missing,
     // easy only when nobody finished at all.
-    const why =
-      mode === "easy"
-        ? "Nobody finished yesterday's goal, and there are no streak freezes left."
-        : "Not everyone finished yesterday's goal, and there are no streak freezes left.";
+    const why = mode === "easy" ? "Nobody finished yesterday." : "Not everyone finished yesterday.";
     await notifyAllMembers(groupId, merged, {
-      title: `🚧 Your ${label} build stalled`,
+      title: `🚧 ${label} stalled`,
       body:
         mode === "hard"
-          ? `${why} Switch to easy mode today to pick it back up where it stalled — after today it's gone.`
-          : `${why} Open the app to pick a new build.`,
+          ? `${why} No freezes left. Switch to easy mode today to save it.`
+          : `${why} No freezes left. Pick a new build.`,
     });
   }
 
