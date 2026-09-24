@@ -220,9 +220,10 @@ describe("withArticle", () => {
     ];
     for (const label of labels) {
       const phrase = withArticle(label);
-      expect(phrase).toMatch(/^an? \w/);
-      // "a Apartment" is the bug this guards against.
-      if (/^[aeiou]/i.test(label)) expect(phrase.startsWith("an ")).toBe(true);
+      expect(phrase).toMatch(/^(an?|the) \w/);
+      // "a Apartment" / "an Apartments" / "a Twin Towers" are the bugs this guards against.
+      if (/[^s]s$/i.test(label)) expect(phrase.startsWith("the ")).toBe(true);
+      else if (/^[aeiou]/i.test(label)) expect(phrase.startsWith("an ")).toBe(true);
       else expect(phrase.startsWith("a ")).toBe(true);
     }
   });

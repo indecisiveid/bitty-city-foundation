@@ -30,7 +30,7 @@ describe("quest copy", () => {
 
   it("states the objective and the reward", () => {
     const q = invite();
-    expect(rewardPhrase(q)).toMatch(/^an? .+ \+ 100 bricks$/);
+    expect(rewardPhrase(q)).toMatch(/^(an?|the) .+ \+ 100 bricks$/);
     expect(objectiveOf(q)).toMatch(/^Invite a friend and complete a day together to win /);
     const sale = offerQuest("material_sale", s({ buildings: 4, activeMembers: 3 }), ON, seededRng(3));
     expect(objectiveOf(sale)).toBe("Medium builds are open to you, at 2 days each. Land one for 40 bricks.");
@@ -58,7 +58,7 @@ describe("quest copy", () => {
     expect(questEndingNotice(q, "Riverside").title).toBe("⏳ Last day: Invite friends bonus!");
     const done = questCompletedNotice({ ...q, status: "completed" }, "Riverside", "apartment_c");
     expect(done.title).toBe("🏆 Invite friends bonus complete");
-    expect(done.body).toBe("Riverside won an Apartments + 100 bricks each.");
+    expect(done.body).toBe("Riverside won the Apartments + 100 bricks each.");
   });
 
   it("the comeback offer is the one winback message", () => {

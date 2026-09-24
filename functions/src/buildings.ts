@@ -6,10 +6,13 @@
 import { daysFor, labelFor } from "./buildCatalog";
 
 /**
- * "a House" / "an Apartment". The labels are a closed, hand-written set, so a
+ * "a House" / "an Office" / "the Apartments". The labels are a closed, hand-written set, so a
  * leading-vowel test is enough — no need for a real article library.
  */
 export function withArticle(label: string): string {
+  // Plural names ("Apartments", "Twin Towers") take "the": "an Apartments"
+  // and "a Twin Towers" read as typos.
+  if (/[^s]s$/i.test(label)) return `the ${label}`;
   return `${/^[aeiou]/i.test(label) ? "an" : "a"} ${label}`;
 }
 

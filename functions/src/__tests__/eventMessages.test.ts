@@ -42,7 +42,7 @@ describe("event notices keep their words", () => {
 
   it("next up / restoring / rescue / repair / kudos / nudge", () => {
     expect(nextUpNotice("Riverside", "Amit", "Apartments", 3).body).toBe(
-      "Amit picked an Apartments for Riverside. It takes 3 days of everyone completing their goal.",
+      "Amit picked the Apartments for Riverside. It takes 3 days of everyone completing their goal.",
     );
     expect(restoringNotice("building", "Riverside", "Amit", "Cottage", 1).body).toContain("Today's goal restores it.");
     expect(restoringNotice("park", "Riverside", "Amit", "Park", 3).title).toBe("🌳 Restoring a Park");
