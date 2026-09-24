@@ -42,5 +42,6 @@ export { setGameMode, dismissModeSuggestion } from "./modeHandlers";
 export { dismissQuest, demoOfferQuest } from "./questHandlers";
 
 export { buyHardHats } from "./shopHandlers";
+export { redeemPurchase, placeHardHats } from "./storeHandlers";
 
 export { dailyNudge } from "./scheduled";

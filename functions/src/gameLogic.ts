@@ -212,6 +212,9 @@ export interface FreezeEvent {
   /** Settlement label of the (first) day the freeze covered. */
   date: string;
   kind: FreezeEventKind;
+  /** A refill's origin: bought with bricks (absent, the original meaning)
+   *  or moved in from the member's own inventory of bought hard hats. */
+  source?: "bricks" | "inventory";
   /** The mode the day was scored under — what a "miss" meant. */
   mode: GameMode;
   /**

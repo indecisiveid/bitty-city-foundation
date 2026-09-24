@@ -46,6 +46,14 @@ functions/src/
   questRunner.ts     quest I/O: config/quests, the tick (runQuests), in-tx
                      helpers for the callables, bricks + notices after writes
   questHandlers.ts   dismissQuest; demoOfferQuest (allowlisted dev control)
+  bricks.ts          PURE — brick wallet + ledger (earned on landings, bought in packs)
+  shopHandlers.ts    buyHardHats: spend bricks to refill a city's hard hats
+  store.ts           PURE — App Store packs: catalog (product id → hard hats |
+                     bricks), account token, refusals, crediting, hat transfer
+  storeVerify.ts     StoreKit 2 JWS verification (Apple's library + certs/);
+                     Xcode test purchases accepted ONLY in the emulator
+  storeHandlers.ts   redeemPurchase (verify + credit, once per transaction);
+                     placeHardHats (inventory → a city's pool)
   utils.ts           validation, group code gen, shared response shape
   __tests__/         jest suite for gameLogic
 firestore.rules      groups readable by members only; users/{uid} owner-only;
@@ -87,6 +95,15 @@ durable proof ledger, written by `completeGoal`, member-readable (the app's
 "See proof" reads it directly + resolves photo URLs with the Storage SDK).
 Photos live in Storage at `proofs/{groupId}/{uid}/{random}.jpg` behind
 `storage.rules` (member-read, own-uid create-only, jpeg ≤5 MiB).
+
+**Inventory (no in-game currency):** people buy packs of hard hats or
+bricks with real money. `users/{uid}.hard_hats` holds bought hats not yet in
+a city; `users/{uid}.bricks` (+ `brick_ledger`) holds bricks, earned or
+bought; `users/{uid}.store_ledger` the last 30 purchases.
+`store_transactions/{transactionId}` → `{uid, product_id, environment, at}`
+is the global replay guard (server-only). A city's own hard hats
+(`streak_freezes`) are unchanged; `placeHardHats` moves yours in (freeze
+event `kind: refill, source: inventory`).
 
 `group_codes/{CODE}` → `{group_id}`. `users/{uid}` → `{display_name, group_ids[], created_at, push_tokens[],
 last_seen_at, reminders: {date, sent, farewell_sent_at}, completion_minutes[]}` (cross-device restore + 100-groups cap; `last_seen_at` is presence,
@@ -177,7 +194,7 @@ cd functions && npm test          # jest (gameLogic suite)
 # pubsub is required now too — the scheduled day-rollover function is a
 # Pub/Sub trigger and is silently ignored by the emulator without it.
 firebase emulators:start --only auth,functions,firestore,storage,pubsub --project bitty-city --non-interactive
-node scripts/emulator-smoke.mjs   # 236-check end-to-end smoke (pubsub: scheduler, reminders, quests)
+node scripts/emulator-smoke.mjs   # 249-check end-to-end smoke (pubsub: scheduler, reminders, quests; store packs)
 # Ports busy (another session's emulator)? Start yours from a copy of
 # firebase.json with other ports and run the smoke with
 # SMOKE_{AUTH,FUNCTIONS,FIRESTORE,STORAGE}_PORT=… set.

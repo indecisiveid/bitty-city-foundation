@@ -13,6 +13,7 @@
  * allowlisting, the 7-day inactivity meteor, repairStreak eligibility, and
  * Firestore read rules (member vs non-member vs users/{uid}).
  */
+import { createRequire } from 'module';
 
 // Ports match firebase.json. Overridable so the smoke can target an emulator
 // started with an alternate config (another session already on the defaults).
@@ -233,6 +234,12 @@ function reachableSlots() {
 function ymdDaysAgo(n) {
   const d = new Date(Date.now() - n * 86400000);
   return d.toISOString().slice(0, 10);
+}
+
+// The compiled store rules (functions/lib) — the smoke derives purchase
+// account tokens exactly as the server does.
+function storeLib() {
+  return createRequire(import.meta.url)('../functions/lib/store.js');
 }
 
 async function main() {
@@ -1340,6 +1347,69 @@ async function main() {
   await adminPatch('config/quests', { enabled: { booleanValue: false } }, ['enabled']);
   await call('deleteGroup', { group_id: Q_qCity.group_id }, dev);
   await call('deleteGroup', { group_id: Q_sale.group_id }, dev);
+
+  console.log('— store packs —');
+  // Xcode-style (unsigned) transactions are accepted ONLY in the emulator —
+  // exactly what local StoreKit testing produces. Production refuses them
+  // (storeVerify.test.ts).
+  const S_store = storeLib();
+  const S_b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const S_jws = (fields) => {
+    const now = Date.now();
+    return [
+      S_b64({ alg: 'ES256', x5c: ['AAAA'] }),
+      S_b64({
+        originalTransactionId: fields.transactionId,
+        bundleId: 'com.sidejawn.bittycity',
+        type: 'Consumable',
+        purchaseDate: now,
+        signedDate: now,
+        quantity: 1,
+        environment: 'Xcode',
+        inAppOwnershipType: 'PURCHASED',
+        ...fields,
+      }),
+      'c2lnbmF0dXJl',
+    ].join('.');
+  };
+  const S_tx = `smoke-${Date.now()}`;
+  const S_hatsJws = S_jws({ transactionId: S_tx, productId: 'com.sidejawn.bittycity.hardhats.3', appAccountToken: S_store.accountTokenFor(bob.uid) });
+  const S_hatsOf = async (u) => Number((await readDoc(`users/${u.uid}`, u)).body?.fields?.hard_hats?.integerValue ?? 0);
+  const S_before = await S_hatsOf(bob);
+  const S_redeem = await call('redeemPurchase', { jws: S_hatsJws }, bob);
+  check('redeemPurchase credits a hard-hat pack to the buyer', S_redeem.result?.credited === true && S_redeem.result?.hard_hats === S_before + 3, JSON.stringify(S_redeem).slice(0, 200));
+  check('the inventory is on the buyer\'s own doc', (await S_hatsOf(bob)) === S_before + 3);
+  const S_again = await call('redeemPurchase', { jws: S_hatsJws }, bob);
+  check('redeeming the same transaction again credits nothing', S_again.result?.credited === false && (await S_hatsOf(bob)) === S_before + 3, JSON.stringify(S_again).slice(0, 200));
+  const S_thief = await call('redeemPurchase', { jws: S_hatsJws }, dev);
+  check('another account cannot redeem it', S_thief.error === 'FAILED_PRECONDITION', JSON.stringify(S_thief).slice(0, 200));
+  const S_bricksBefore = await bricksOf(bob);
+  const S_brickRedeem = await call('redeemPurchase', { jws: S_jws({ transactionId: `${S_tx}-b`, productId: 'com.sidejawn.bittycity.bricks.small', appAccountToken: S_store.accountTokenFor(bob.uid) }) }, bob);
+  check('a brick pack lands in the buyer\'s bricks', S_brickRedeem.result?.credited === true && (await bricksOf(bob)) === S_bricksBefore + 120, JSON.stringify(S_brickRedeem).slice(0, 200));
+  const S_unknown = await call('redeemPurchase', { jws: S_jws({ transactionId: `${S_tx}-x`, productId: 'com.sidejawn.bittycity.gold', appAccountToken: S_store.accountTokenFor(bob.uid) }) }, bob);
+  check('an unknown product is refused', S_unknown.error === 'FAILED_PRECONDITION', JSON.stringify(S_unknown).slice(0, 160));
+  const S_garbage = await call('redeemPurchase', { jws: 'not.a.jws' }, bob);
+  check('an undecodable transaction is refused', S_garbage.error === 'PERMISSION_DENIED' || S_garbage.error === 'INVALID_ARGUMENT', JSON.stringify(S_garbage).slice(0, 160));
+  // Put them in a city.
+  const lgS = (await call(
+    'createGroup',
+    { group_name: 'Store City', member: 'Christian', daily_goal: 'Buy it', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+    dev,
+  )).result;
+  await call('joinGroup', { group_code: lgS.group_code, member: 'Bob' }, bob);
+  await adminPatch(`groups/${lgS.group_id}`, { streak_freezes: { integerValue: '1' } }, ['streak_freezes']);
+  const S_place = await call('placeHardHats', { group_id: lgS.group_id, count: 5 }, bob);
+  check('placeHardHats fills the city to the cap from the inventory', S_place.result?.streak_freezes === 3 && S_place.result?.hard_hats === S_before + 1, JSON.stringify(S_place).slice(0, 200));
+  check('placeHardHats says where they came from', S_place.result?.last_freeze_event?.kind === 'refill' && S_place.result?.last_freeze_event?.source === 'inventory' && S_place.result?.last_freeze_event?.by === 'Bob', JSON.stringify(S_place.result?.last_freeze_event));
+  check('the inventory went down by what moved', (await S_hatsOf(bob)) === S_before + 1);
+  const S_full = await call('placeHardHats', { group_id: lgS.group_id, count: 1 }, bob);
+  check('placeHardHats refuses a full city', S_full.error === 'FAILED_PRECONDITION', JSON.stringify(S_full).slice(0, 160));
+  await adminPatch(`groups/${lgS.group_id}`, { streak_freezes: { integerValue: '0' } }, ['streak_freezes']);
+  const S_none = await call('placeHardHats', { group_id: lgS.group_id, count: 1 }, dev);
+  check('placeHardHats refuses with an empty inventory', S_none.error === 'FAILED_PRECONDITION' && (await readDoc(`groups/${lgS.group_id}`, dev)).body?.fields?.streak_freezes?.integerValue === '0', JSON.stringify(S_none).slice(0, 160));
+  const S_outsider = await call('placeHardHats', { group_id: lgS.group_id, count: 1 }, eve);
+  check('placeHardHats requires membership', S_outsider.error === 'FAILED_PRECONDITION', JSON.stringify(S_outsider).slice(0, 120));
+  await call('deleteGroup', { group_id: lgS.group_id }, dev);
 
   console.log('— profile upsert —');
   const upsert = await call('upsertProfile', { display_name: '  Chrisso  ' }, dev);
