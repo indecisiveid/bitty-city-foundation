@@ -61,14 +61,46 @@ export function buildStalledNotice(label: string, mode: "easy" | "hard"): Notice
  * "Tom completed today's goal. Your turn!" — to the members still pending.
  * Carries the Send kudos button: everyone on this list has NOT completed and
  * `completedName` has, exactly the precondition sendKudos enforces.
+ *
+ * With a photo (`proofDate` = the game day it belongs to) the push says so and
+ * carries `proof_date`, so a tap opens that day's proof instead of just the
+ * city — the photo is the news, not the checkmark.
  */
-export function teammateCompletedNotice(cityName: string, completedName: string): Notice {
+export function teammateCompletedNotice(cityName: string, completedName: string, proofDate?: string | null): Notice {
+  const meta: NoticeMeta = {
+    type: "teammate_completed",
+    category: "social",
+    priority: "transactional",
+    variant: proofDate ? "teammate_completed.photo.v1" : "teammate_completed.v1",
+  };
+  return proofDate
+    ? {
+        title: `📸 ${completedName} posted proof`,
+        body: `${completedName} finished today's goal in ${cityName}. See the photo, then it's your turn!`,
+        categoryId: NotificationCategory.TEAMMATE_COMPLETED,
+        data: { completed_by: completedName, proof_date: proofDate },
+        meta,
+      }
+    : {
+        title: cityName,
+        body: `${completedName} completed today's goal. Your turn!`,
+        categoryId: NotificationCategory.TEAMMATE_COMPLETED,
+        data: { completed_by: completedName },
+        meta,
+      };
+}
+
+/**
+ * The same photo, to crewmates who already finished today. Nothing is asked
+ * of them, so it's `normal` (budgeted) social, not transactional, and it has
+ * no kudos button — they can cheer from the crew list, where the photo is.
+ */
+export function proofPostedNotice(cityName: string, completedName: string, proofDate: string): Notice {
   return {
-    title: cityName,
-    body: `${completedName} completed today's goal. Your turn!`,
-    categoryId: NotificationCategory.TEAMMATE_COMPLETED,
-    data: { completed_by: completedName },
-    meta: { type: "teammate_completed", category: "social", priority: "transactional", variant: "teammate_completed.v1" },
+    title: `📸 ${completedName} posted proof`,
+    body: `${completedName} finished today's goal in ${cityName}. Tap to see the photo.`,
+    data: { completed_by: completedName, proof_date: proofDate },
+    meta: { type: "proof_posted", category: "social", priority: "normal", variant: "proof_posted.v1" },
   };
 }
 

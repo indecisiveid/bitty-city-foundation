@@ -81,3 +81,8 @@ export function applyProof(
   if (state.entries[member]) return { state, isNew: false };
   return { state: { date: today, entries: { ...state.entries, [member]: entry } }, isNew: true };
 }
+
+/** How many of `today`'s proofs are photos (skips don't count). */
+export function photoCount(raw: unknown, today: string): number {
+  return Object.values(normalizeProofs(raw, today).entries).filter((e) => e.status === "photo").length;
+}

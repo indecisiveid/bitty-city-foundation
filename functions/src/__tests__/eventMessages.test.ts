@@ -13,6 +13,7 @@ import {
   restoringNotice,
   streakRepairedNotice,
   teammateCompletedNotice,
+  proofPostedNotice,
   testNotice,
 } from "../eventMessages";
 import { NotificationCategory } from "../push";
@@ -38,6 +39,26 @@ describe("event notices keep their words", () => {
     expect(n.body).toBe("Tom completed today's goal. Your turn!");
     expect(n.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
     expect(n.data).toEqual({ completed_by: "Tom" });
+    expect(n.meta.variant).toBe("teammate_completed.v1");
+  });
+
+  it("teammate completed with a photo says so and opens the proof", () => {
+    const n = teammateCompletedNotice("Riverside", "Tom", "2026-09-25");
+    expect(n.title).toBe("📸 Tom posted proof");
+    expect(n.body).toBe("Tom finished today's goal in Riverside. See the photo, then it's your turn!");
+    // Still the kudos category: the recipients are still pending.
+    expect(n.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
+    expect(n.data).toEqual({ completed_by: "Tom", proof_date: "2026-09-25" });
+    expect(n.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.photo.v1" });
+  });
+
+  it("proof posted — to crewmates already done: no kudos button, budgeted", () => {
+    const n = proofPostedNotice("Riverside", "Tom", "2026-09-25");
+    expect(n.title).toBe("📸 Tom posted proof");
+    expect(n.body).toBe("Tom finished today's goal in Riverside. Tap to see the photo.");
+    expect(n.categoryId).toBeUndefined();
+    expect(n.data).toEqual({ completed_by: "Tom", proof_date: "2026-09-25" });
+    expect(n.meta).toMatchObject({ type: "proof_posted", category: "social", priority: "normal" });
   });
 
   it("next up / restoring / rescue / repair / kudos / nudge", () => {
@@ -60,6 +81,8 @@ describe("labels", () => {
     buildStalledNotice("Park", "hard"),
     buildStalledNotice("Park", "easy"),
     teammateCompletedNotice("R", "Tom"),
+    teammateCompletedNotice("R", "Tom", "2026-09-25"),
+    proofPostedNotice("R", "Tom", "2026-09-25"),
     nextUpNotice("R", "A", "Cottage", 1),
     restoringNotice("building", "R", "A", "Cottage", 1),
     restoringNotice("park", "R", "A", "Park", 2),

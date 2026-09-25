@@ -1,6 +1,6 @@
 import { readFileSync } from "fs";
 import { join } from "path";
-import { applyProof, normalizeProofs, isProofKeyFor, MAX_PROOF_BYTES } from "../proofs";
+import { applyProof, normalizeProofs, isProofKeyFor, photoCount, MAX_PROOF_BYTES } from "../proofs";
 
 const TODAY = "2026-09-03";
 const YESTERDAY = "2026-09-02";
@@ -70,4 +70,16 @@ it("day rollover clears proofs_today alongside kudos_today", () => {
   const block = src.slice(at, at + 600);
   expect(block).toMatch(/kudos_today: null/);
   expect(block).toMatch(/proofs_today: null/);
+});
+
+describe("photoCount", () => {
+  it("counts today's photos, not skips or another day's", () => {
+    const raw = {
+      date: TODAY,
+      entries: { Tom: { status: "photo", key: "proofs/g1/u1/a.jpg" }, Amit: { status: "skipped" } },
+    };
+    expect(photoCount(raw, TODAY)).toBe(1);
+    expect(photoCount(raw, YESTERDAY)).toBe(0);
+    expect(photoCount(null, TODAY)).toBe(0);
+  });
 });

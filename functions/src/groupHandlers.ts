@@ -33,7 +33,7 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
-import { notice, cityGrewNotice, buildStalledNotice, teammateCompletedNotice, nextUpNotice, restoringNotice, buildRescuedNotice, streakRepairedNotice } from "./eventMessages";
+import { notice, cityGrewNotice, buildStalledNotice, teammateCompletedNotice, proofPostedNotice, nextUpNotice, restoringNotice, buildRescuedNotice, streakRepairedNotice } from "./eventMessages";
 import { onBuildStarted, onCompletion, onJoin, onLanding, salePeekAllows, Quest } from "./quests";
 import { afterQuestCompleted, afterQuestProgress, questWrite } from "./questRunner";
 import { touchLastSeen, localMinutesOf } from "./presence";
@@ -41,7 +41,7 @@ import { joinedMessage, leftMessage } from "./crewMessages";
 import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
 import { buildProgressOf } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor, minBuildingsFor } from "./buildCatalog";
-import { isProofKeyFor, applyProof, ProofEntry, MAX_PROOF_BYTES } from "./proofs";
+import { isProofKeyFor, applyProof, photoCount, ProofEntry, MAX_PROOF_BYTES } from "./proofs";
 import {
   GameMode,
   LEGACY_GAME_MODE,
@@ -927,27 +927,42 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     const stillPending: string[] = activeMembersOn(rosterOf(finalData!), today).filter(
       (m: string) => !done.includes(m),
     );
+    const cityName = finalData!.group_name ?? "Bitty City";
+    // A photo is the news: the push says so and a tap opens it. The date is
+    // the game day the proof was filed under (the day ledger's doc id) —
+    // stamped inside the transaction, so a call straddling the reset still
+    // points at the right day.
+    const filedOn: string = finalData!.proofs_today?.date ?? today;
+    const proofDate = proofEntry.status === "photo" ? filedOn : null;
     if (stillPending.length > 0) {
       await notifyMembers(
         group_id,
         finalData!,
         stillPending,
-        teammateCompletedNotice(finalData!.group_name ?? "Bitty City", completedName),
+        teammateCompletedNotice(cityName, completedName, proofDate),
       );
+      // Crewmates who already finished don't get "your turn" — but they do
+      // want to see the photo.
+      const alreadyDone = done.filter((m) => m !== completedName);
+      if (proofDate && alreadyDone.length > 0) {
+        await notifyMembers(group_id, finalData!, alreadyDone, proofPostedNotice(cityName, completedName, proofDate));
+      }
     } else {
       // That was the last one — the whole crew is in. Celebrate the day and
       // point at what's next. If this completion landed the build, the copy
       // already says so (dayCompleteMessage reads the build before it was
       // cleared? — no: it reads `finalData`, so pass the pre-landing build).
+      // If anyone posted a photo today, a tap opens the whole day's proof.
+      const dayNotice = notice(dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!), {
+        type: "day_complete",
+        category: "crew",
+        priority: "normal",
+        variant: landedBuild ? "day_complete.landed.v1" : "day_complete.v1",
+      });
       await notifyAllMembers(
         group_id,
         finalData!,
-        notice(dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!), {
-          type: "day_complete",
-          category: "crew",
-          priority: "normal",
-          variant: landedBuild ? "day_complete.landed.v1" : "day_complete.v1",
-        }),
+        photoCount(finalData!.proofs_today, filedOn) > 0 ? { ...dayNotice, data: { proof_date: filedOn } } : dayNotice,
       );
     }
   }
