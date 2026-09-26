@@ -21,6 +21,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { memberNameForUid, maybeProcessDay } from "./groupHandlers";
 import { citySettingsChangedMessage } from "./crewMessages";
 import { notifyAllMembers } from "./notify";
+import { notice } from "./eventMessages";
 import { normalizeGoalType } from "./goals";
 import { groupToResponse, requireGoalType, requireTrimmed } from "./utils";
 import { requireAuth } from "./auth";
@@ -65,7 +66,12 @@ export const updateCitySettings = onCall({ enforceAppCheck: true }, async (reque
     await notifyAllMembers(
       group_id,
       after,
-      { ...message, data: { type: "city_settings" } },
+      notice(message, {
+        type: "city_settings",
+        category: "crew",
+        priority: "normal",
+        variant: updates.daily_goal !== undefined ? "city_settings.goal.v1" : "city_settings.renamed.v1",
+      }),
       callerName,
     );
   }
