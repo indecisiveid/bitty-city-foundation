@@ -45,7 +45,7 @@ describe("event notices keep their words", () => {
   it("teammate completed with a photo says so and opens the proof", () => {
     const n = teammateCompletedNotice("Riverside", "Tom", "2026-09-25");
     expect(n.title).toBe("📸 Tom posted proof");
-    expect(n.body).toBe("Tom finished today's goal in Riverside. See the photo, then it's your turn!");
+    expect(n.body).toBe("Tom finished today's goal in Riverside.");
     // Still the kudos category: the recipients are still pending.
     expect(n.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
     expect(n.data).toEqual({ completed_by: "Tom", proof_date: "2026-09-25" });

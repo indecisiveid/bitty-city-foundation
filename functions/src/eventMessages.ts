@@ -76,7 +76,7 @@ export function teammateCompletedNotice(cityName: string, completedName: string,
   return proofDate
     ? {
         title: `📸 ${completedName} posted proof`,
-        body: `${completedName} finished today's goal in ${cityName}. See the photo, then it's your turn!`,
+        body: `${completedName} finished today's goal in ${cityName}.`,
         categoryId: NotificationCategory.TEAMMATE_COMPLETED,
         data: { completed_by: completedName, proof_date: proofDate },
         meta,
