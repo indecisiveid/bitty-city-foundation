@@ -307,6 +307,26 @@ async function main() {
   const eveComplete = await call('completeGoal', { group_id: g.group_id }, eve);
   check('non-member completeGoal rejected', eveComplete.error === 'FAILED_PRECONDITION', JSON.stringify(eveComplete));
 
+  console.log('— city settings —');
+  check('goal_type defaults to custom', g?.goal_type === 'custom', JSON.stringify(g?.goal_type));
+  const edited = await call(
+    'updateCitySettings',
+    { group_id: g.group_id, group_name: 'Smoke Town', daily_goal: 'Move 20 min', goal_type: 'exercise' },
+    bob,
+  );
+  check(
+    'any member can edit name, goal and category',
+    edited.result?.group_name === 'Smoke Town' && edited.result?.daily_goal === 'Move 20 min' && edited.result?.goal_type === 'exercise',
+    JSON.stringify(edited).slice(0, 200),
+  );
+  check('a goal edit keeps today\'s check-ins', edited.result?.completions_today?.includes('Christian'));
+  const badType = await call('updateCitySettings', { group_id: g.group_id, goal_type: 'steps' }, dev);
+  check('unknown goal_type rejected', badType.error === 'INVALID_ARGUMENT', JSON.stringify(badType));
+  const eveEdit = await call('updateCitySettings', { group_id: g.group_id, daily_goal: 'nope' }, eve);
+  check('non-member edit rejected', eveEdit.error === 'FAILED_PRECONDITION', JSON.stringify(eveEdit));
+  // Put it back so later sections see the city they expect.
+  await call('updateCitySettings', { group_id: g.group_id, group_name: 'Smoke City', daily_goal: 'Run 1 mile', goal_type: 'custom' }, dev);
+
   console.log('— proofs —');
   const pc = await call(
     'createGroup',
