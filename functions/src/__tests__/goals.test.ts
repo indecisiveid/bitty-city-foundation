@@ -1,21 +1,21 @@
-import { isGoalType, normalizeGoalType } from "../goals";
-import { requireGoalType } from "../utils";
+import { isGoalCategory, normalizeGoalCategory } from "../goals";
+import { requireGoalCategory } from "../utils";
 import { citySettingsChangedMessage } from "../crewMessages";
 
 describe("goal categories", () => {
   it("absent or unknown reads as custom", () => {
-    expect(normalizeGoalType(undefined)).toBe("custom");
-    expect(normalizeGoalType("yoga")).toBe("custom");
-    expect(normalizeGoalType("exercise")).toBe("exercise");
+    expect(normalizeGoalCategory(undefined)).toBe("custom");
+    expect(normalizeGoalCategory("yoga")).toBe("custom");
+    expect(normalizeGoalCategory("body")).toBe("body");
   });
 
   it("only known categories validate", () => {
-    expect(isGoalType("mindfulness")).toBe(true);
-    expect(isGoalType("steps")).toBe(false);
-    expect(requireGoalType(undefined)).toBe("custom");
-    expect(requireGoalType(null)).toBe("custom");
-    expect(requireGoalType("exercise")).toBe("exercise");
-    expect(() => requireGoalType("steps")).toThrow("goal_type");
+    expect(isGoalCategory("mind")).toBe(true);
+    expect(isGoalCategory("exercise")).toBe(false);
+    expect(requireGoalCategory(undefined)).toBe("custom");
+    expect(requireGoalCategory(null)).toBe("custom");
+    expect(requireGoalCategory("focus")).toBe("focus");
+    expect(() => requireGoalCategory("exercise")).toThrow("goal_category");
   });
 });
 

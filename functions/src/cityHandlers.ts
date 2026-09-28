@@ -1,7 +1,7 @@
 /**
  * City settings callable — updateCitySettings.
  *
- *   updateCitySettings { group_id, group_name?, daily_goal?, goal_type? }
+ *   updateCitySettings { group_id, group_name?, daily_goal?, goal_category? }
  *
  * Backs the app's city settings page. Send only the fields being changed;
  * an omitted field is left as it is. ANY member may edit, like setGameMode:
@@ -22,21 +22,21 @@ import { memberNameForUid, maybeProcessDay } from "./groupHandlers";
 import { citySettingsChangedMessage } from "./crewMessages";
 import { notifyAllMembers } from "./notify";
 import { notice } from "./eventMessages";
-import { normalizeGoalType } from "./goals";
-import { groupToResponse, requireGoalType, requireTrimmed } from "./utils";
+import { normalizeGoalCategory } from "./goals";
+import { groupToResponse, requireGoalCategory, requireTrimmed } from "./utils";
 import { requireAuth } from "./auth";
 
 const db = () => getFirestore();
 
 export const updateCitySettings = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = requireAuth(request);
-  const { group_id, group_name, daily_goal, goal_type } = request.data ?? {};
+  const { group_id, group_name, daily_goal, goal_category } = request.data ?? {};
   if (!group_id) throw new HttpsError("invalid-argument", "group_id is required");
 
   // Validate everything before touching the city, with the createGroup rules.
   const name = group_name === undefined ? undefined : requireTrimmed(group_name, "group_name", 3, 40);
   const goal = daily_goal === undefined ? undefined : requireTrimmed(daily_goal, "daily_goal", 1, 200);
-  const type = goal_type === undefined ? undefined : requireGoalType(goal_type);
+  const type = goal_category === undefined ? undefined : requireGoalCategory(goal_category);
 
   const groupRef = db().collection("groups").doc(group_id);
   const snap = await groupRef.get();
@@ -48,7 +48,7 @@ export const updateCitySettings = onCall({ enforceAppCheck: true }, async (reque
   const updates: Record<string, unknown> = {};
   if (name !== undefined && name !== data.group_name) updates.group_name = name;
   if (goal !== undefined && goal !== data.daily_goal) updates.daily_goal = goal;
-  if (type !== undefined && type !== normalizeGoalType(data.goal_type)) updates.goal_type = type;
+  if (type !== undefined && type !== normalizeGoalCategory(data.goal_category)) updates.goal_category = type;
 
   if (Object.keys(updates).length === 0) {
     // Nothing to change, nothing to announce.
