@@ -46,4 +46,6 @@ export { redeemPurchase, placeHardHats } from "./storeHandlers";
 
 export { updateCitySettings } from "./cityHandlers";
 
+export { markTipsSeen, setEmailUpdates } from "./preferenceHandlers";
+
 export { dailyNudge } from "./scheduled";

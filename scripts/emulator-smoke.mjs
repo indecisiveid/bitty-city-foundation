@@ -307,6 +307,29 @@ async function main() {
   const eveComplete = await call('completeGoal', { group_id: g.group_id }, eve);
   check('non-member completeGoal rejected', eveComplete.error === 'FAILED_PRECONDITION', JSON.stringify(eveComplete));
 
+  console.log('— preferences —');
+  const seen1 = await call('markTipsSeen', { ids: ['proof_photos', 'city_settings'] }, bob);
+  const seen2 = await call('markTipsSeen', { ids: ['city_settings', 'shop_bricks'] }, bob);
+  check(
+    'seen tips merge without repeats',
+    JSON.stringify(seen2.result?.seen_tips) === JSON.stringify(['proof_photos', 'city_settings', 'shop_bricks']),
+    JSON.stringify([seen1, seen2]).slice(0, 200),
+  );
+  const badTip = await call('markTipsSeen', { ids: ['../nope'] }, bob);
+  check('malformed tip id rejected', badTip.error === 'INVALID_ARGUMENT', JSON.stringify(badTip));
+  const optIn = await call('setEmailUpdates', { enabled: true, source: 'tip' }, bob);
+  const bobPrefs = await readDoc(`users/${bob.uid}`, bob);
+  const eu = bobPrefs.body?.fields?.email_updates?.mapValue?.fields;
+  check(
+    'email opt-in recorded with when and where',
+    optIn.result?.email_updates?.enabled === true && eu?.enabled?.booleanValue === true && eu?.source?.stringValue === 'tip' && !!eu?.at?.stringValue,
+    JSON.stringify(bobPrefs.body).slice(0, 300),
+  );
+  const badSource = await call('setEmailUpdates', { enabled: true, source: 'import' }, bob);
+  check('opt-in needs a real source', badSource.error === 'INVALID_ARGUMENT', JSON.stringify(badSource));
+  const optOut = await call('setEmailUpdates', { enabled: false, source: 'settings' }, bob);
+  check('opt-out recorded', optOut.result?.email_updates?.enabled === false, JSON.stringify(optOut));
+
   console.log('— city settings —');
   check('goal_category defaults to custom', g?.goal_category === 'custom', JSON.stringify(g?.goal_category));
   const edited = await call(

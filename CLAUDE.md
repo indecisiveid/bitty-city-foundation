@@ -23,6 +23,10 @@ functions/src/
   modeHandlers.ts    Callables: setGameMode (any member), dismissModeSuggestion
   goals.ts           PURE — goal categories (goal_category: custom|body|mind|focus|life),
                      the app picker's four groups; absent / typed goal = custom
+  preferences.ts     PURE — per-person prefs on users/{uid}: seen_tips (the app's
+                     feature tips, kept on the account) and email_updates
+                     {enabled, at, source} — the consent record; absent = never email
+  preferenceHandlers.ts  Callables: markTipsSeen, setEmailUpdates
   cityHandlers.ts    Callable: updateCitySettings (any member) — name, goal text,
                      goal category. NOT reset time/timezone (moving the day
                      boundary mid-game needs its own design)
@@ -66,6 +70,7 @@ firestore.rules      groups readable by members only; users/{uid} owner-only;
 storage.rules        proof photos: proofs/{groupId}/{uid}/{id}.jpg — member-read,
                      own-uid create-only, jpeg ≤5 MiB (membership via firestore.get)
 scripts/emulator-smoke.mjs   end-to-end emulator test (see below)
+scripts/email-audience.mjs   read-only: opted-in emails → CSV for the mailing tool
 ```
 
 ## Data model
