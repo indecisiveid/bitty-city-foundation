@@ -27,6 +27,10 @@ functions/src/
                      feature tips, kept on the account) and email_updates
                      {enabled, at, source} — the consent record; absent = never email
   preferenceHandlers.ts  Callables: markTipsSeen, setEmailUpdates
+  invites.ts         PURE — what an invite link shows before joining (founder,
+                     crew, goal, full / already-in / city-cap flags)
+  inviteHandlers.ts  Callable: previewInvite { group_code } — readable by any
+                     signed-in user who has the code (it already lets them join)
   cityHandlers.ts    Callable: updateCitySettings (any member) — name, goal text,
                      goal category. NOT reset time/timezone (moving the day
                      boundary mid-game needs its own design)
