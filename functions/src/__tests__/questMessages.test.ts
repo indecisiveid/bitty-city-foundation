@@ -7,7 +7,6 @@ import {
   questEndingNotice,
   questOfferedNotice,
   questProgressNotice,
-  questReminderClause,
   rewardPhrase,
   withDisplay,
 } from "../questMessages";
@@ -66,14 +65,6 @@ describe("quest copy", () => {
     const n = questOfferedNotice(back, "Riverside");
     expect(n.meta.category).toBe("winback");
     expect(n.body).toBe("Riverside misses you. Complete one day together to earn a hard hat + 30 bricks.");
-  });
-
-  it("adds the quest's stake to reminders while it runs", () => {
-    const q = invite();
-    expect(questReminderClause(q, TODAY)).toBe(" The Invite friends bonus is on.");
-    expect(questReminderClause({ ...q, ends_on: TODAY }, TODAY)).toBe(" The Invite friends bonus ends today.");
-    expect(questReminderClause({ ...q, status: "expired" }, TODAY)).toBe("");
-    expect(questReminderClause(null, TODAY)).toBe("");
   });
 
   it("withDisplay writes the card's words onto the quest", () => {

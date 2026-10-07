@@ -3,12 +3,15 @@
  * push — just "given this group's state at this local moment, should we nudge,
  * whom, and how urgently?". Kept pure so it's jest-testable like gameLogic.
  *
- * The crew gets up to FOUR nudges per game-day, at fixed local times:
+ * The crew gets up to TWO nudges per game-day, at fixed local times:
  *
- *   08:00  morning   → plan the day ("Today is Day 2 of 3…" on a multi-day build)
- *   11:30  midday
  *   17:30  evening
  *   21:00  lastCall
+ *
+ * (There used to be a 08:00 morning plan and an 11:30 midday nag too. Cut in
+ * October 2026: on top of the "Amit finished — your turn" pushes they made a
+ * normal crew day 8–10 notifications, and the teammate push already does the
+ * midday job better than a clock does.)
  *
  * The scheduler runs every 30 minutes and each slot claims a 30-minute window
  * starting at its time, so a tick lands in at most one slot and scheduler
@@ -21,22 +24,20 @@
  *
  * WHO gets each slot differs, and that is the point of `recipients`:
  *
- *   morning / midday / evening → only the members who still haven't completed.
- *                                Telling someone who is already done that the
- *                                goal is open is just noise to them.
- *   lastCall                   → EVERYONE. The people who are done are the
- *                                only ones who can still save the day, by
- *                                chasing whoever is holding it up, so the last
- *                                slot addresses both sides. They get different
- *                                copy (see `messageFor`): finish it vs chase
- *                                them.
+ *   evening  → only the members who still haven't completed. Telling
+ *              someone who is already done that the goal is open is just
+ *              noise to them.
+ *   lastCall → EVERYONE. The people who are done are the
+ *            only ones who can still save the day, by chasing whoever
+ *              is holding it up, so the last slot addresses both sides.
+ *              They get different copy (see `messageFor`): finish it vs
+ *              chase them.
  *
  * A crew that is already complete is never nudged at all, so the last-call
  * chaser can only reach someone whose crew genuinely still has a gap.
  *
- * A SOLO city is different. The four-slot escalation exists for crews — the
- * chaser mechanic, "who's holding the day up" — and to one person it is just
- * the same nag four times. A solo city gets ONE reminder (evening), plus last
+ * A SOLO city is different. The chaser mechanic — "who's holding the day
+ * up" — exists for crews. A solo city gets ONE reminder (evening), plus last
  * call only while a live streak is at stake, plus the meteor warning at any
  * slot. (Per-person frequency on top of this lives in reminderTiers.ts.)
  *
@@ -52,15 +53,13 @@
 import { INACTIVITY_METEOR_DAYS } from "./gameLogic";
 import { GameMode } from "./gameMode";
 
-export type SlotId = "morning" | "midday" | "evening" | "lastCall";
+export type SlotId = "evening" | "lastCall";
 
 /** How long after its start time a slot still counts as "now" (scheduler jitter). */
 export const SLOT_WINDOW_MINUTES = 30;
 
-/** The four daily nudge times, as minutes since local midnight. */
+/** The daily nudge times, as minutes since local midnight. */
 export const REMINDER_SLOTS: ReadonlyArray<{ id: SlotId; minutes: number }> = [
-  { id: "morning", minutes: 8 * 60 }, // 08:00
-  { id: "midday", minutes: 11 * 60 + 30 }, // 11:30
   { id: "evening", minutes: 17 * 60 + 30 }, // 17:30
   { id: "lastCall", minutes: 21 * 60 }, // 21:00
 ];
@@ -97,7 +96,7 @@ export interface Nudge {
   kind: NudgeKind;
   /** 'all' for the meteor warning and last call, 'incomplete' otherwise. */
   recipients: "all" | "incomplete";
-  /** Which of the four daily slots this nudge is filling. */
+  /** Which of the daily slots this nudge is filling. */
   slot: SlotId;
 }
 
@@ -164,11 +163,9 @@ export function decideNudge(input: NudgeInput): Nudge | null {
     daysUntilMeteor(input.idleDays, input.daysSinceMeteor) === 1;
   if (meteorImminent) return { kind: "meteor", recipients: "all", slot };
 
-  // Solo: no morning plan, no midday nag — one person doesn't need a crew's
-  // escalation ladder. Evening is the one reminder; last call is decided
-  // below, once we know whether a streak is on the line.
+  // Solo: evening is the one reminder; last call is decided below, once we
+  // know whether a streak is on the line.
   const solo = input.memberCount === 1;
-  if (solo && (slot === "morning" || slot === "midday")) return null;
 
   // Last call goes to the whole crew — the members who are done are the ones
   // who can still chase the stragglers, and this is the last moment it can

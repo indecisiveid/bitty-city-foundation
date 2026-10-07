@@ -35,21 +35,21 @@ const base: NudgeInput = {
 };
 
 describe("slotForLocalMinutes", () => {
-  it("maps the four advertised local times to slots", () => {
-    expect(slotForLocalMinutes(8 * 60)).toBe("morning"); // 08:00
-    expect(slotForLocalMinutes(11 * 60 + 30)).toBe("midday"); // 11:30
+  it("maps the two advertised local times to slots", () => {
     expect(slotForLocalMinutes(17 * 60 + 30)).toBe("evening"); // 17:30
     expect(slotForLocalMinutes(21 * 60)).toBe("lastCall"); // 21:00
   });
 
   it("tolerates scheduler jitter inside the slot window but not past it", () => {
-    expect(slotForLocalMinutes(8 * 60 + SLOT_WINDOW_MINUTES - 1)).toBe("morning");
-    expect(slotForLocalMinutes(8 * 60 + SLOT_WINDOW_MINUTES)).toBeNull();
-    expect(slotForLocalMinutes(8 * 60 - 1)).toBeNull();
+    expect(slotForLocalMinutes(21 * 60 + SLOT_WINDOW_MINUTES - 1)).toBe("lastCall");
+    expect(slotForLocalMinutes(21 * 60 + SLOT_WINDOW_MINUTES)).toBeNull();
+    expect(slotForLocalMinutes(21 * 60 - 1)).toBeNull();
   });
 
   it("is null at times that belong to no slot", () => {
     expect(slotForLocalMinutes(0)).toBeNull(); // midnight
+    expect(slotForLocalMinutes(8 * 60)).toBeNull(); // the old morning slot
+    expect(slotForLocalMinutes(11 * 60 + 30)).toBeNull(); // the old midday slot
     expect(slotForLocalMinutes(14 * 60)).toBeNull(); // 2pm
     expect(slotForLocalMinutes(23 * 60 + 59)).toBeNull();
   });
@@ -70,8 +70,8 @@ describe("decideNudge", () => {
     expect(decideNudge({ ...base, localMinutes: 14 * 60 })).toBeNull();
   });
 
-  it("fires each of the four slots on the same day for a crew", () => {
-    const slots: SlotId[] = ["morning", "midday", "evening", "lastCall"];
+  it("fires both slots on the same day for a crew", () => {
+    const slots: SlotId[] = ["evening", "lastCall"];
     const sent: SlotId[] = [];
     for (const id of slots) {
       const n = decideNudge({
@@ -83,7 +83,7 @@ describe("decideNudge", () => {
       expect(n?.slot).toBe(id);
       sent.push(id);
     }
-    expect(sent).toHaveLength(4);
+    expect(sent).toHaveLength(2);
   });
 
   it("sends each slot at most once per game-day", () => {
@@ -107,9 +107,9 @@ describe("decideNudge", () => {
   });
 
   it("never back-fills a slot whose window already passed", () => {
-    // It's 17:30 (evening). The morning + midday windows are long gone and
-    // must not fire retroactively — a build started midday gets what's left.
-    expect(decideNudge(base)?.slot).toBe("evening");
+    // It's 21:00 (last call). The evening window is long gone and must not
+    // fire retroactively — a build started at 7pm gets what's left.
+    expect(decideNudge({ ...base, localMinutes: at("lastCall") })?.slot).toBe("lastCall");
   });
 
   it("stays silent when the whole crew is done", () => {
@@ -261,83 +261,62 @@ describe("buildProgressOf", () => {
 });
 
 describe("messageFor", () => {
-  const ctx = { cityName: "Testville", streak: 4, build: null };
-  const build = { label: "Apartment", dayNumber: 2, daysRequired: 3 };
+  const ctx = { cityName: "Testville", streak: 4 };
 
-  it("uses Day X of Y copy on the morning slot of a multi-day build", () => {
-    const m = messageFor(
-      { kind: "reminder", recipients: "incomplete", slot: "morning" },
-      { ...ctx, build },
-    );
-    expect(m.body).toContain("Today is Day 2 of 3");
-    expect(m.body).toContain("Apartment");
-  });
-
-  it("does not use Day X of Y on the later slots", () => {
-    const m = messageFor(
-      { kind: "reminder", recipients: "incomplete", slot: "midday" },
-      { ...ctx, build },
-    );
-    expect(m.body).not.toContain("Day 2 of 3");
-  });
-
-  it("lets the meteor warning outrank the morning day-plan copy", () => {
-    const m = messageFor(
-      { kind: "meteor", recipients: "all", slot: "morning" },
-      { ...ctx, build },
-    );
-    expect(m.title).toContain("Meteor");
-  });
-
-  it("mentions the streak length on a streak nudge", () => {
+  it("puts the streak in the title on a streak nudge", () => {
     const m = messageFor({ kind: "streak", recipients: "incomplete", slot: "evening" }, ctx);
-    expect(m.body).toContain("4-day streak");
+    expect(m.title).toBe("🔥 4-day streak on the line");
+    expect(m.body).toBe("Still time to finish in Testville.");
   });
 
   it("has a distinct last-call voice, streak or not", () => {
     const plain = messageFor({ kind: "reminder", recipients: "incomplete", slot: "lastCall" }, ctx);
-    expect(plain.title).toContain("Last call");
+    expect(plain.title).toBe("⏳ Last call");
+    expect(plain.body).toBe("Today's goal in Testville is still open.");
     const streak = messageFor({ kind: "streak", recipients: "incomplete", slot: "lastCall" }, ctx);
-    expect(streak.title).toContain("Last call");
-    expect(streak.body).toContain("4-day streak");
+    expect(streak.title).toBe("⏳ Last call: 4-day streak");
   });
 
-  it("never sends the same text twice in one day", () => {
-    // Four identical pushes reads like a broken loop. Every slot the crew can
-    // receive in a single day must say something different.
-    const slots: SlotId[] = ["morning", "midday", "evening", "lastCall"];
+  it("the meteor names the city and what to do", () => {
+    const m = messageFor({ kind: "meteor", recipients: "all", slot: "evening" }, ctx);
+    expect(m).toEqual({ title: "☄️ Meteor incoming", body: "Finish today's goal to save Testville." });
+  });
+
+  it("never sends the same push twice in one day", () => {
+    const slots: SlotId[] = ["evening", "lastCall"];
     for (const kind of ["streak", "reminder"] as const) {
-      for (const b of [null, build]) {
-        const bodies = slots.map(
-          (slot) => messageFor({ kind, recipients: "incomplete", slot }, { ...ctx, build: b }).body,
-        );
-        expect(new Set(bodies).size).toBe(slots.length);
-      }
+      const pushes = slots.map((slot) => {
+        const m = messageFor({ kind, recipients: "incomplete", slot }, ctx);
+        return `${m.title}|${m.body}`;
+      });
+      expect(new Set(pushes).size).toBe(slots.length);
     }
   });
 
   it("always produces a non-empty title and body", () => {
-    const slots: SlotId[] = ["morning", "midday", "evening", "lastCall"];
-    for (const slot of slots) {
+    for (const slot of ["evening", "lastCall"] as SlotId[]) {
       for (const kind of ["meteor", "streak", "reminder"] as const) {
-        for (const b of [null, build]) {
-          const m = messageFor({ kind, recipients: "all", slot }, { ...ctx, build: b });
-          expect(m.title.length).toBeGreaterThan(0);
-          expect(m.body.length).toBeGreaterThan(0);
-        }
+        const m = messageFor({ kind, recipients: "all", slot }, ctx);
+        expect(m.title.length).toBeGreaterThan(0);
+        expect(m.body.length).toBeGreaterThan(0);
       }
     }
   });
 });
 
 describe("dayCompleteMessage", () => {
-  it("promises the next commitment day mid multi-day build", () => {
+  it("banks the day mid multi-day build", () => {
     const m = dayCompleteMessage({
       group_name: "Testville",
       current_build: { type: "apartment", days_required: 3, days_completed: 1 },
     });
-    expect(m.body).toContain("Day 2 of 3");
-    expect(m.body).toContain("Next commitment day");
+    expect(m.body).toBe("Day 2 of 3 banked for your Apartment.");
+  });
+
+  it("points at the day's photos, which early finishers no longer get one by one", () => {
+    const data = { group_name: "Testville", current_build: null };
+    expect(dayCompleteMessage(data, 1).body).toBe("The whole crew finished in Testville. 1 photo to see.");
+    expect(dayCompleteMessage(data, 3).body).toContain("3 photos to see.");
   });
 
   it("celebrates the finished building on the final day", () => {
@@ -370,7 +349,7 @@ describe("isValidPushToken", () => {
 /**
  * Who each slot actually reaches.
  *
- * The three daytime slots speak only to the people who still owe the goal —
+ * The evening slot speaks only to the people who still owe the goal —
  * telling someone who is already done that the goal is open is noise, and
  * noise is how an app gets its notifications switched off for good.
  *
@@ -394,7 +373,7 @@ describe("who each slot reaches", () => {
     daysSinceMeteor: null as number | null,
   };
 
-  it.each<SlotId>(["morning", "midday", "evening"])(
+  it.each<SlotId>(["evening"])(
     "%s reaches only the members who haven't completed",
     (slot) => {
       const n = decideNudge({ ...base, localMinutes: at(slot) });
@@ -434,27 +413,27 @@ describe("messageFor — the last-call chaser", () => {
 
   it("tells a finished member who is holding the day up", () => {
     const m = messageFor(lastCall, ctx, "done");
-    expect(m.body).toContain("Sam and Jordan");
-    expect(m.body).toContain("You're done");
+    expect(m.title).toBe("⏳ Waiting on Sam and Jordan");
+    expect(m.body).toBe("A nudge could save the 3-day streak in Riverside.");
   });
 
   it("asks a pending member to finish, and never to chase themselves", () => {
     const m = messageFor(lastCall, ctx, "pending");
-    expect(m.body).not.toContain("You're done");
+    expect(m.title).not.toContain("Waiting on");
     expect(m.body).toContain("still open");
   });
 
   it("gives the two sides different copy", () => {
     // Same city, same slot, same tick — if these ever collapse to one string
     // the split has silently stopped meaning anything.
-    expect(messageFor(lastCall, ctx, "done").body).not.toBe(
-      messageFor(lastCall, ctx, "pending").body,
+    expect(messageFor(lastCall, ctx, "done").title).not.toBe(
+      messageFor(lastCall, ctx, "pending").title,
     );
   });
 
   it("names one straggler in the singular", () => {
     const m = messageFor(lastCall, { ...ctx, pendingNames: ["Sam"] }, "done");
-    expect(m.body).toContain("Sam hasn't");
+    expect(m.title).toBe("⏳ Waiting on Sam");
   });
 
   it("truncates a long list rather than reciting the roster", () => {
@@ -463,8 +442,7 @@ describe("messageFor — the last-call chaser", () => {
       { ...ctx, pendingNames: ["Sam", "Jordan", "Riley"] },
       "done",
     );
-    expect(m.body).toContain("Sam and 2 others");
-    expect(m.body).not.toContain("Riley");
+    expect(m.title).toBe("⏳ Waiting on Sam +2");
   });
 
   it("drops the streak clause when there is no streak to lose", () => {
@@ -479,7 +457,7 @@ describe("messageFor — the last-call chaser", () => {
   it("leaves every other slot untouched by the role argument", () => {
     // Only last call is two-sided; passing a role anywhere else must not
     // quietly change what the pending members read.
-    for (const slot of ["morning", "midday", "evening"] as SlotId[]) {
+    for (const slot of ["evening"] as SlotId[]) {
       const n = { kind: "streak" as const, recipients: "incomplete" as const, slot };
       expect(messageFor(n, ctx, "done").body).toBe(messageFor(n, ctx).body);
     }
@@ -487,20 +465,12 @@ describe("messageFor — the last-call chaser", () => {
 });
 
 /**
- * Solo cities. The four-slot ladder is a crew mechanic — plan, nag, chase,
- * last call. To one person it is the same reminder four times, and 7 of the 9
- * cities real users founded were solo. So: evening once, last call only when
- * a live streak is at stake, and the meteor whenever it is due.
+ * Solo cities. The chaser is a crew mechanic, and 7 of the 9 cities real users
+ * founded were solo. So: evening once, last call only when a live streak is
+ * at stake, and the meteor whenever it is due.
  */
 describe("decideNudge — solo city", () => {
   const solo: NudgeInput = { ...base, memberCount: 1, completedCount: 0 };
-
-  it("says nothing in the morning or at midday", () => {
-    expect(decideNudge({ ...solo, localMinutes: at("morning") })).toBeNull();
-    expect(decideNudge({ ...solo, localMinutes: at("midday") })).toBeNull();
-    // …even with a streak on the line: evening will say so.
-    expect(decideNudge({ ...solo, streak: 5, localMinutes: at("midday") })).toBeNull();
-  });
 
   it("sends the one evening reminder, streak or not", () => {
     expect(decideNudge({ ...solo, localMinutes: at("evening") })).toEqual({
@@ -521,7 +491,7 @@ describe("decideNudge — solo city", () => {
   });
 
   it("still warns about the meteor at any slot", () => {
-    for (const slot of ["morning", "midday", "evening", "lastCall"] as SlotId[]) {
+    for (const slot of ["evening", "lastCall"] as SlotId[]) {
       const n = decideNudge({ ...solo, localMinutes: at(slot), idleDays: INACTIVITY_METEOR_DAYS - 1 });
       expect(n?.kind).toBe("meteor");
     }
@@ -531,22 +501,20 @@ describe("decideNudge — solo city", () => {
     expect(decideNudge({ ...solo, completedCount: 1, localMinutes: at("evening") })).toBeNull();
   });
 
-  it("a crew of two keeps the full ladder", () => {
+  it("a crew of two gets last call even with nothing at stake", () => {
     const duo = { ...base, memberCount: 2, completedCount: 0 };
-    expect(decideNudge({ ...duo, localMinutes: at("morning") })).not.toBeNull();
-    expect(decideNudge({ ...duo, localMinutes: at("midday") })).not.toBeNull();
+    expect(decideNudge({ ...duo, localMinutes: at("evening") })).not.toBeNull();
     expect(decideNudge({ ...duo, localMinutes: at("lastCall") })).not.toBeNull();
   });
 });
 
 describe("messageFor — naming the friend and the stake", () => {
-  const ctx = { cityName: "Amitopolis", streak: 3, build: null, pendingNames: ["Amit"] };
+  const ctx = { cityName: "Amitopolis", streak: 3, pendingNames: ["Amit"] };
   const evening = { kind: "streak" as const, recipients: "incomplete" as const, slot: "evening" as const };
 
-  it("leads with who already checked in when the recipient is the last one", () => {
+  it("leads with who finished when the recipient is the last one", () => {
     const m = messageFor(evening, { ...ctx, completedNames: ["Jennifer"] });
-    expect(m.body.startsWith("Jennifer already checked in — you're the last one. ")).toBe(true);
-    expect(m.body).toContain("3-day streak");
+    expect(m.body).toBe("Jennifer finished — you're the last one in Amitopolis.");
   });
 
   it("counts the others still to go when several are pending", () => {
@@ -555,55 +523,46 @@ describe("messageFor — naming the friend and the stake", () => {
       pendingNames: ["Amit", "Sam", "Riley"],
       completedNames: ["Jennifer", "Dee"],
     });
-    expect(m.body).toContain("Jennifer and Dee already checked in. 3 still to go.");
+    expect(m.body).toBe("Jennifer and Dee finished. 3 to go in Amitopolis.");
   });
 
   it("truncates a long list of finished members", () => {
-    const m = messageFor(evening, { ...ctx, completedNames: ["A", "B", "C", "D"] });
-    expect(m.body).toContain("A and 3 others already checked in");
+    const m = messageFor(evening, { ...ctx, pendingNames: ["Amit", "Z"], completedNames: ["A", "B", "C", "D"] });
+    expect(m.body).toBe("A +3 finished. 2 to go in Amitopolis.");
   });
 
-  it("says nothing about the crew when nobody has finished", () => {
-    const m = messageFor(evening, { ...ctx, completedNames: [] });
-    expect(m.body.startsWith("Today's goal in Amitopolis")).toBe(true);
+  it("names the build that lands tonight in the title when no streak is at stake", () => {
+    const m = messageFor({ ...evening, kind: "reminder" }, { ...ctx, streak: 0, landsToday: "Cottage" });
+    expect(m.title).toBe("🏗️ Cottage lands tonight");
+    const last = messageFor({ ...evening, kind: "reminder", slot: "lastCall" }, { ...ctx, streak: 0, landsToday: "Cottage" });
+    expect(last.title).toBe("⏳ Last call: Cottage lands tonight");
   });
 
-  it("names the build that lands tonight, on every reminder slot", () => {
-    for (const slot of ["morning", "midday", "evening", "lastCall"] as SlotId[]) {
-      const m = messageFor({ ...evening, slot }, { ...ctx, landsToday: "Cottage" });
-      expect(m.body).toContain("Finish today and your Cottage lands tonight.");
-    }
-  });
-
-  it("does not attach the landing clause to the meteor or the chaser", () => {
+  it("does not attach the landing to the meteor or the chaser", () => {
     expect(
-      messageFor({ kind: "meteor", recipients: "all", slot: "evening" }, { ...ctx, landsToday: "Cottage" }).body,
+      messageFor({ kind: "meteor", recipients: "all", slot: "evening" }, { ...ctx, landsToday: "Cottage" }).title,
     ).not.toContain("lands tonight");
     expect(
       messageFor(
         { kind: "streak", recipients: "all", slot: "lastCall" },
         { ...ctx, landsToday: "Cottage", completedNames: ["Jennifer"] },
         "done",
-      ).body,
+      ).title,
     ).not.toContain("lands tonight");
   });
 
-  it("still never sends the same body twice in a day, whatever the crew has done", () => {
-    const slots: SlotId[] = ["morning", "midday", "evening", "lastCall"];
-    const build = { label: "Apartment", dayNumber: 2, daysRequired: 3 };
-    for (const kind of ["streak", "reminder"] as const) {
-      for (const b of [null, build]) {
-        for (const completedNames of [[], ["Jennifer"], ["Jennifer", "Dee"]]) {
-          for (const landsToday of [null, "Apartment"]) {
-            const bodies = slots.map(
-              (slot) =>
-                messageFor(
-                  { kind, recipients: "incomplete", slot },
-                  { ...ctx, build: b, completedNames, landsToday },
-                ).body,
-            );
-            expect(new Set(bodies).size).toBe(slots.length);
-          }
+  it("keeps every reminder short — one line of title, one short clause of body", () => {
+    const names = ["Jennifer", "Dee", "Christopher", "Alexandra"];
+    for (const slot of ["evening", "lastCall"] as SlotId[]) {
+      for (const kind of ["meteor", "streak", "reminder"] as const) {
+        for (const role of ["pending", "done"] as const) {
+          const m = messageFor(
+            { kind, recipients: "all", slot },
+            { cityName: "Bitty Philadelphia", streak: 123, pendingNames: names, completedNames: names, landsToday: "Apartments restoration" },
+            role,
+          );
+          expect(m.title.length).toBeLessThanOrEqual(50);
+          expect(m.body.length).toBeLessThanOrEqual(70);
         }
       }
     }
@@ -633,14 +592,13 @@ describe("landingTodayLabel", () => {
 
 describe("farewellMessage", () => {
   it("names one city, or speaks of cities", () => {
-    expect(farewellMessage(["Bitty Philly"]).body).toContain("Your city Bitty Philly will be waiting");
-    expect(farewellMessage(["A", "B"]).body).toContain("Your cities will be waiting");
+    expect(farewellMessage(["Bitty Philly"]).body).toBe("Bitty Philly will be here when you're back.");
+    expect(farewellMessage(["A", "B"]).body).toBe("Your cities will be here when you're back.");
   });
 
   it("states the fact and leaves the door open — no guilt, no countdown", () => {
     const m = farewellMessage(["Bitty Philly"]);
-    expect(m.title).toContain("stop reminding");
-    expect(m.body).toContain("two weeks");
+    expect(m.title).toBe("👋 Pausing reminders");
     expect(m.body).not.toMatch(/streak|meteor|lose|last chance/i);
   });
 });

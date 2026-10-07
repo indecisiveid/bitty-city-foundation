@@ -5,6 +5,9 @@
  */
 import {
   DAILY_BUDGET,
+  DAILY_TOTAL_CAP,
+  capAllows,
+  recentlyPinged,
   decideNotice,
   EMPTY_LEDGER,
   isQuietTime,
@@ -106,5 +109,64 @@ describe("recordNotice / ledgerOf", () => {
   it("survives junk", () => {
     expect(ledgerOf(undefined)).toEqual(EMPTY_LEDGER);
     expect(ledgerOf({ counts: 3 })).toEqual({ date: null, counts: {}, keys: {} });
+  });
+});
+
+describe("the daily cap — one budget across every category", () => {
+  const mixed = (counts: Record<string, number>) => ({ date: TODAY, counts, keys: {} });
+  const kudos = meta({ type: "kudos", category: "social", priority: "transactional" });
+  const reminder = meta({ type: "reminder", category: "reminder" });
+
+  it("is four a day", () => {
+    expect(DAILY_TOTAL_CAP).toBe(4);
+  });
+
+  it("a friend's message or a reminder may use the last slot", () => {
+    const three = mixed({ social: 1, reminder: 1, crew: 1 });
+    expect(decideNotice(kudos, "active", three, TODAY, NOON).deliver).toBe(true);
+    expect(capAllows(reminder, three, TODAY)).toBe(true);
+    const four = mixed({ social: 2, reminder: 1, crew: 1 });
+    expect(decideNotice(kudos, "active", four, TODAY, NOON)).toEqual({ deliver: false, reason: "daily cap" });
+    expect(capAllows(reminder, four, TODAY)).toBe(false);
+  });
+
+  it("city news leaves the last slot free", () => {
+    expect(decideNotice(meta(), "active", mixed({ social: 2 }), TODAY, NOON).deliver).toBe(true);
+    expect(decideNotice(meta(), "active", mixed({ social: 3 }), TODAY, NOON).deliver).toBe(false);
+  });
+
+  it("never holds back something at stake, or a test push", () => {
+    const full = mixed({ social: 4, crew: 2 });
+    expect(decideNotice(meta({ priority: "important" }), "active", full, TODAY, NOON).deliver).toBe(true);
+    expect(capAllows(meta({ category: "system", priority: "transactional" }), full, TODAY)).toBe(true);
+  });
+
+  it("starts fresh each day", () => {
+    expect(capAllows(kudos, { date: "2026-09-22", counts: { social: 9 }, keys: {} }, TODAY)).toBe(true);
+  });
+});
+
+describe("teammate pings — the reminder quiet window", () => {
+  const turn = meta({ type: "teammate_completed", category: "social", priority: "transactional" });
+  const at = new Date("2026-09-23T18:00:00Z");
+
+  it("stamps the city a 'your turn' push came from", () => {
+    const l = recordNotice(EMPTY_LEDGER, turn, TODAY, { groupId: "g1", at });
+    expect(l.turns).toEqual({ g1: at.toISOString() });
+    expect(recentlyPinged(l, "g1", new Date(at.getTime() + 2 * 3_600_000))).toBe(true);
+    expect(recentlyPinged(l, "g1", new Date(at.getTime() + 3 * 3_600_000))).toBe(false);
+    expect(recentlyPinged(l, "g2", at)).toBe(false);
+  });
+
+  it("survives a reload and forgets stamps older than a day", () => {
+    const l = recordNotice(EMPTY_LEDGER, turn, TODAY, { groupId: "g1", at });
+    expect(ledgerOf(JSON.parse(JSON.stringify(l))).turns).toEqual({ g1: at.toISOString() });
+    const nextDay = new Date(at.getTime() + 25 * 3_600_000);
+    const later = recordNotice(l, turn, "2026-09-24", { groupId: "g2", at: nextDay });
+    expect(later.turns).toEqual({ g2: nextDay.toISOString() });
+  });
+
+  it("other notices leave no stamp", () => {
+    expect(recordNotice(EMPTY_LEDGER, meta(), TODAY).turns).toBeUndefined();
   });
 });

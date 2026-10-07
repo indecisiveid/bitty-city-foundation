@@ -18,7 +18,7 @@ import { Nudge } from "../reminderLogic";
 const nudge = (over: Partial<Nudge> = {}): Nudge => ({
   kind: "reminder",
   recipients: "incomplete",
-  slot: "midday",
+  slot: "evening",
   ...over,
 });
 
@@ -31,7 +31,7 @@ const entry = (
   cityName,
   nudge: nudge(),
   role: "pending",
-  ctx: { cityName, streak: 0, build: null, pendingNames: ["Sam"], ...ctxOver },
+  ctx: { cityName, streak: 0, pendingNames: ["Sam"], ...ctxOver },
   ...over,
 });
 
@@ -53,7 +53,7 @@ describe("consolidate — one city is untouched", () => {
   });
 
   it("holds for every slot and kind, not just the one I happened to try", () => {
-    const slots = ["morning", "midday", "evening", "lastCall"] as const;
+    const slots = ["evening", "lastCall"] as const;
     const kinds = ["reminder", "streak", "meteor"] as const;
     for (const slot of slots) {
       for (const kind of kinds) {
@@ -87,8 +87,7 @@ describe("consolidate — several cities become one push", () => {
       entry("Doomed", { nudge: nudge({ kind: "meteor", recipients: "all" }) }),
     ])!;
     expect(out.title).toContain("Meteor");
-    expect(out.body).toContain("Doomed");
-    expect(out.body).toContain("1 other city");
+    expect(out.body).toBe("Finish today's goal to save Doomed (+1 more city open).");
   });
 
   it("counts the streaks actually at stake", () => {
@@ -106,11 +105,12 @@ describe("consolidate — several cities become one push", () => {
       entry("B"),
     ])!;
     expect(out.title).toBe("🔥 1 streak on the line");
-    expect(out.body).toContain("streak is riding on it");
+    expect(out.body).toBe("Still open: A and B.");
   });
 
   it("stays quiet about streaks when none are at stake", () => {
     const out = consolidate([entry("A"), entry("B")])!;
+    expect(out.title).toBe("Today's goals are open");
     expect(out.body).not.toContain("streak");
   });
 });
@@ -121,18 +121,15 @@ describe("consolidate — the last-call chaser across cities", () => {
 
   it("asks someone who is done everywhere to chase their crews", () => {
     const out = consolidate([done("A"), done("B")])!;
-    expect(out.title).toContain("Last call");
-    expect(out.body).toContain("You're done in A and B");
-    expect(out.body).toContain("2 crews");
+    expect(out.title).toBe("⏳ Last call for your crews");
+    expect(out.body).toBe("2 crews are still waiting on someone. A nudge might do it.");
   });
 
   it("leads with what the person must DO when they owe a goal somewhere", () => {
     // Mixed: pending in one city, merely chasing in another. Their own
     // outstanding goal is the actionable half, so it leads.
     const out = consolidate([entry("Owed"), done("Waiting")])!;
-    expect(out.body).toContain("still open in Owed");
-    expect(out.body).toContain("1 other crew is waiting");
-    expect(out.body).not.toContain("You're done");
+    expect(out.body).toBe("Still open: Owed.");
   });
 });
 

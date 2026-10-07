@@ -23,7 +23,7 @@ const entry = (slot: SlotId, kind: Nudge["kind"] = "reminder", city = "Riverside
   cityName: city,
   nudge: { kind, recipients: "incomplete", slot },
   role: "pending",
-  ctx: { cityName: city, streak: 0, build: null },
+  ctx: { cityName: city, streak: 0 },
   gameDate: TODAY,
 });
 
@@ -64,7 +64,7 @@ describe("reminderStateOf", () => {
 
 describe("applyUserTier — active", () => {
   it("passes everything the cities decided, untouched", () => {
-    const entries = [entry("morning"), entry("morning", "streak", "Hilltop")];
+    const entries = [entry("evening"), entry("evening", "streak", "Hilltop")];
     expect(applyUserTier(entries, "active", EMPTY_REMINDER_STATE, TODAY)).toEqual({ action: "send", entries });
   });
 
@@ -74,27 +74,10 @@ describe("applyUserTier — active", () => {
 });
 
 describe("applyUserTier — cooling", () => {
-  it("drops the daytime slots", () => {
-    for (const slot of ["morning", "midday"] as SlotId[]) {
-      const d = applyUserTier([entry(slot)], "cooling", EMPTY_REMINDER_STATE, TODAY);
-      expect(d.action).toBe("skip");
-    }
-  });
-
-  it("keeps evening and last call, and the meteor at any slot", () => {
+  it("sends evening, last call and the meteor", () => {
     expect(applyUserTier([entry("evening")], "cooling", EMPTY_REMINDER_STATE, TODAY).action).toBe("send");
     expect(applyUserTier([entry("lastCall", "streak")], "cooling", EMPTY_REMINDER_STATE, TODAY).action).toBe("send");
-    expect(applyUserTier([entry("morning", "meteor")], "cooling", EMPTY_REMINDER_STATE, TODAY).action).toBe("send");
-  });
-
-  it("filters a mixed bag down to what a cooling user hears", () => {
-    const d = applyUserTier(
-      [entry("morning", "reminder", "A"), entry("morning", "meteor", "B")],
-      "cooling",
-      EMPTY_REMINDER_STATE,
-      TODAY,
-    );
-    expect(d).toEqual({ action: "send", entries: [entry("morning", "meteor", "B")] });
+    expect(applyUserTier([entry("evening", "meteor")], "cooling", EMPTY_REMINDER_STATE, TODAY).action).toBe("send");
   });
 
   it("caps at one push per game-day", () => {

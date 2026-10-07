@@ -4,12 +4,7 @@
  * given how long since they last opened the app (presence.ts).
  *
  *   active   (< 7 days idle)  → everything the cities decided.
- *   cooling  (7–13 days)      → at most ONE push per game-day, and only the
- *                               late-day slots (evening / last call) — a
- *                               morning "plan your day" to someone who hasn't
- *                               looked in a week is noise. The meteor warning
- *                               still passes: it's the one push about a real
- *                               consequence.
+ *   cooling  (7–13 days)      → at most ONE push per game-day.
  *   dormant  (≥ 14 days)      → one farewell ("we'll stop reminding you"),
  *                               then silence until they open the app again,
  *                               which clears the farewell (presence.ts) and
@@ -19,7 +14,6 @@
  * is honest, and it is the last push that can still bring someone back.
  */
 import { NudgeEntry } from "./nudgeMessages";
-import { SlotId } from "./reminderLogic";
 
 export type ReminderTier = "active" | "cooling" | "dormant";
 
@@ -60,9 +54,6 @@ export type TierDecision =
   | { action: "farewell" }
   | { action: "skip"; reason: string };
 
-/** Slots a cooling user still hears. */
-const COOLING_SLOTS: ReadonlySet<SlotId> = new Set<SlotId>(["evening", "lastCall"]);
-
 export function sentTodayOf(state: UserReminderState, todayDate: string): number {
   return state.date === todayDate ? state.sent : 0;
 }
@@ -80,8 +71,6 @@ export function applyUserTier(
   if (tier === "active") return { action: "send", entries };
 
   // cooling
-  const kept = entries.filter((e) => e.nudge.kind === "meteor" || COOLING_SLOTS.has(e.nudge.slot));
-  if (kept.length === 0) return { action: "skip", reason: "cooling: quiet slot" };
   if (sentTodayOf(state, todayDate) >= 1) return { action: "skip", reason: "cooling: daily cap" };
-  return { action: "send", entries: kept };
+  return { action: "send", entries };
 }

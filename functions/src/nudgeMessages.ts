@@ -6,64 +6,52 @@
  * decides *whether* and *whom*; this file decides *what it says*.
  */
 import { Nudge, NudgeKind } from "./reminderLogic";
-import { BuildProgress } from "./buildings";
 
 export interface MessageContext {
   cityName: string;
   streak: number;
-  build: BuildProgress | null;
   /** Members who still haven't completed — names the last-call chaser uses. */
   pendingNames?: string[];
   /** Members already done today, in completion order — "Amit already checked in". */
   completedNames?: string[];
   /** Label of the build that lands if the crew wins today (buildings.landingTodayLabel). */
   landsToday?: string | null;
-  /** A running quest's stake, already a clause: " The Material Sale ends today." */
-  questClause?: string;
 }
 
 /**
  * Which side of the crew a recipient is on. Only `lastCall` addresses both:
- * every other slot is sent to the pending members alone.
+ * the evening slot is sent to the pending members alone.
  */
 export type NudgeRole = "pending" | "done";
 
 /**
- * Name the members still holding the day up, as a clause.
- *
- * Truncated past two, because a push body is not a roster and the useful
- * information is "who do I chase first", not the full list.
+ * Push copy rules (October 2026 rewrite): the title is the news, the body is
+ * ONE short clause. The old reminders stacked every fact we had — who's done,
+ * how many are left, the city, the streak, tonight's landing, the quest — into
+ * ~200 characters that iOS truncated anyway. Each fact now has one place: the
+ * stake (streak, or a build landing tonight) goes in the title, the crew
+ * status in the body.
  */
-function pendingClause(names: string[]): string {
-  if (names.length === 0) return "someone hasn't";
-  if (names.length === 1) return `${names[0]} hasn't`;
-  if (names.length === 2) return `${names[0]} and ${names[1]} haven't`;
-  return `${names[0]} and ${names.length - 1} others haven't`;
+
+/** Short name list: "Sam", "Sam and Jo", "Sam +2". */
+export function shortNames(names: string[]): string {
+  if (names.length === 0) return "your crew";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names[0]} +${names.length - 1}`;
 }
 
 /**
- * Who has already checked in, as a lead-in. Naming the friend who is done is
- * the strongest sentence a reminder can open with — it turns "do your goal"
- * into "your crew is waiting on you" — and when the recipient is the last one
- * out, it says so.
+ * Where the crew stands, as one clause. Naming the friend who is done is the
+ * strongest thing a reminder can say — it turns "do your goal" into "your crew
+ * is waiting on you" — and when the recipient is the last one out, it says so.
  */
-function alreadyIn(ctx: MessageContext): string {
+function crewStatus(ctx: MessageContext, fallback: string): string {
   const done = ctx.completedNames ?? [];
-  if (done.length === 0) return "";
-  const who =
-    done.length === 1
-      ? done[0]
-      : done.length === 2
-        ? `${done[0]} and ${done[1]}`
-        : `${done[0]} and ${done.length - 1} others`;
+  if (done.length === 0) return fallback;
   const pending = ctx.pendingNames?.length ?? 0;
-  if (pending <= 1) return `${who} already checked in — you're the last one. `;
-  return `${who} already checked in. ${pending} still to go. `;
-}
-
-/** The concrete thing at stake tonight, when a build would land — and any quest. */
-function landing(ctx: MessageContext): string {
-  return (ctx.landsToday ? ` Finish today and your ${ctx.landsToday} lands tonight.` : "") + (ctx.questClause ?? "");
+  if (pending <= 1) return `${shortNames(done)} finished — you're the last one in ${ctx.cityName}.`;
+  return `${shortNames(done)} finished. ${pending} to go in ${ctx.cityName}.`;
 }
 
 /**
@@ -72,13 +60,12 @@ function landing(ctx: MessageContext): string {
  * left open (spec §9.5).
  */
 export function farewellMessage(cityNames: string[]) {
-  const where =
-    cityNames.length === 1
-      ? `Your city ${cityNames[0]} will be waiting`
-      : "Your cities will be waiting";
   return {
-    title: "👋 We'll stop reminding you",
-    body: `You haven't opened Bitty City in two weeks, so we'll stop these reminders. ${where} whenever you're back.`,
+    title: "👋 Pausing reminders",
+    body:
+      cityNames.length === 1
+        ? `${cityNames[0]} will be here when you're back.`
+        : "Your cities will be here when you're back.",
   };
 }
 
@@ -88,74 +75,52 @@ export function farewellMessage(cityNames: string[]) {
  * `role` only changes the wording at last call, where the crew is addressed on
  * both sides: the people who still owe the goal are told to finish it, and the
  * people who are already done — the only ones who can still rescue the day —
- * are told who to chase. Defaults to `pending`, which is every other slot.
+ * are told who to chase. Defaults to `pending`.
  */
 export function messageFor(
   nudge: Nudge,
   ctx: MessageContext,
   role: NudgeRole = "pending",
 ) {
+  const { cityName, streak } = ctx;
+
   // The meteor outranks everything — it's the only one that costs buildings.
   if (nudge.kind === "meteor") {
-    return {
-      title: "☄️ Meteor incoming",
-      body: `${ctx.cityName} hasn't been active in days — complete today's goal to stop the meteor.`,
-    };
+    return { title: "☄️ Meteor incoming", body: `Finish today's goal to save ${cityName}.` };
   }
 
-  // Every slot gets its own voice. Four pushes a day that all read "keep the
-  // streak alive" feels like a broken loop, so the day escalates instead:
-  // plan it → nudge → still open → last call. A test pins that no two slots
-  // in the same day can produce the same body.
-  const { cityName, streak, build } = ctx;
   const onStreak = nudge.kind === "streak";
-  // The goal is always the thing to do; the streak is what's at stake. Keeping
-  // them in separate clauses avoids copy like "finish your 4-day streak".
-  const stake = (clause: string) => (onStreak ? ` ${clause}` : "");
 
   // The chaser. Nobody reaches this unless their crew still has a gap —
   // decideNudge goes quiet the moment everyone is done.
   if (role === "done" && nudge.slot === "lastCall") {
     return {
-      title: "⏳ Last call for the crew",
-      body: `You're done in ${cityName}, but ${pendingClause(ctx.pendingNames ?? [])} finished today's goal.${stake(`Your ${streak}-day streak is riding on it.`)} A nudge might be all it takes.`,
+      title: `⏳ Waiting on ${shortNames(ctx.pendingNames ?? [])}`,
+      body: onStreak
+        ? `A nudge could save the ${streak}-day streak in ${cityName}.`
+        : `A nudge might be all ${cityName} needs.`,
     };
   }
 
-  switch (nudge.slot) {
-    case "morning":
-      // The morning slot sets up the day. On a multi-day build, say where we are.
-      if (build) {
-        const { dayNumber, daysRequired, label } = build;
-        return {
-          title: `🌅 Day ${dayNumber} of ${daysRequired}`,
-          body: `Today is Day ${dayNumber} of ${daysRequired}. Plan to complete your goal today to finish building your ${label}.`,
-        };
-      }
-      return {
-        title: "🌅 Good morning",
-        body: `${alreadyIn(ctx)}Plan when you'll finish today's goal in ${cityName}.${stake(`Your ${streak}-day streak depends on it.`)}${landing(ctx)}`,
-      };
+  // The stake goes in the title: the streak if there is one, else a build
+  // that lands tonight. The two slots read differently so the day escalates.
+  const stake = onStreak
+    ? `${streak}-day streak`
+    : ctx.landsToday
+      ? `${ctx.landsToday} lands tonight`
+      : null;
 
-    case "midday":
-      return {
-        title: onStreak ? "🔥 Keep the streak alive" : "Bitty City",
-        body: `${alreadyIn(ctx)}Don't forget today's goal in ${cityName}.${stake(`Your ${streak}-day streak is on the line.`)}${landing(ctx)}`,
-      };
-
-    case "evening":
-      return {
-        title: onStreak ? "🔥 Streak still open" : "Bitty City",
-        body: `${alreadyIn(ctx)}Today's goal in ${cityName} still isn't checked off.${stake(`Your ${streak}-day streak is riding on it.`)}${landing(ctx)}`,
-      };
-
-    case "lastCall":
-    default:
-      return {
-        title: "⏳ Last call",
-        body: `${alreadyIn(ctx)}The day's nearly done and today's goal in ${cityName} is still open.${stake(`Last chance to save your ${streak}-day streak.`)}${landing(ctx)}`,
-      };
+  if (nudge.slot === "lastCall") {
+    return {
+      title: stake ? `⏳ Last call: ${stake}` : "⏳ Last call",
+      body: crewStatus(ctx, `Today's goal in ${cityName} is still open.`),
+    };
   }
+
+  return {
+    title: onStreak ? `🔥 ${stake} on the line` : stake ? `🏗️ ${stake}` : "Today's goal is open",
+    body: crewStatus(ctx, `Still time to finish in ${cityName}.`),
+  };
 }
 
 
@@ -235,9 +200,7 @@ export function consolidate(entries: NudgeEntry[]): ConsolidatedPush | null {
     const others = entries.length - 1;
     return {
       title: "☄️ Meteor incoming",
-      body:
-        `${worst.cityName} hasn't been active in days — complete today's goal to stop the meteor. ` +
-        `${others} other ${plural(others, "city", "cities")} still ${plural(others, "needs", "need")} today's goal too.`,
+      body: `Finish today's goal to save ${worst.cityName} (+${others} more ${plural(others, "city", "cities")} open).`,
     };
   }
 
@@ -249,27 +212,16 @@ export function consolidate(entries: NudgeEntry[]): ConsolidatedPush | null {
     const n = entries.length;
     return {
       title: "⏳ Last call for your crews",
-      body:
-        `You're done in ${cityList(entries.map((e) => e.cityName))}, but ${n} ` +
-        `${plural(n, "crew", "crews")} still ${plural(n, "hasn't", "haven't")} finished today's goal. ` +
-        `A nudge might be all it takes.`,
+      body: `${n} ${plural(n, "crew is", "crews are")} still waiting on someone. A nudge might do it.`,
     };
   }
 
   const atStake = pending.filter((e) => e.nudge.kind === "streak").length;
-  const waiting = entries.length - pending.length;
 
   return {
     title: atStake > 0
       ? `🔥 ${atStake} ${plural(atStake, "streak", "streaks")} on the line`
-      : "Bitty City",
-    body:
-      `Today's goal is still open in ${cityList(pending.map((e) => e.cityName))}.` +
-      (atStake > 0
-        ? ` Your ${plural(atStake, "streak is", "streaks are")} riding on it.`
-        : "") +
-      (waiting > 0
-        ? ` ${waiting} other ${plural(waiting, "crew", "crews")} ${plural(waiting, "is", "are")} waiting on someone too.`
-        : ""),
+      : "Today's goals are open",
+    body: `Still open: ${cityList(pending.map((e) => e.cityName))}.`,
   };
 }

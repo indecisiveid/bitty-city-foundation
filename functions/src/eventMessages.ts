@@ -30,13 +30,13 @@ export function cityGrewNotice(cityName: string, label: string, restored: boolea
   return restored
     ? {
         title: `🧱 ${cityName} is whole again`,
-        body: `Your crew restored ${withArticle(label)}. Come see it in the city.`,
-        meta: crew("city_grew", "city_grew.restored.v1"),
+        body: `Your crew restored ${withArticle(label)}.`,
+        meta: crew("city_grew", "city_grew.restored.v2"),
       }
     : {
         title: `🏙️ ${cityName} grew!`,
-        body: `Your crew finished ${withArticle(label)}. Come see it in the city.`,
-        meta: crew("city_grew", "city_grew.v1"),
+        body: `Your crew built ${withArticle(label)}.`,
+        meta: crew("city_grew", "city_grew.v2"),
       };
 }
 
@@ -58,102 +58,28 @@ export function buildStalledNotice(label: string, mode: "easy" | "hard"): Notice
 }
 
 /**
- * "Tom completed today's goal. Your turn!" — to the members still pending.
- * Carries the Send kudos button: everyone on this list has NOT completed and
- * `completedName` has, exactly the precondition sendKudos enforces.
- *
- * With a photo (`proofDate` = the game day it belongs to) the push says so and
- * carries `proof_date`, so a tap opens that day's proof instead of just the
- * city — the photo is the news, not the checkmark.
+ * A teammate finished. Sent to the members still pending, and only for the
+ * first finisher of the day or when one person is left (`last`) — see
+ * completeGoal. With a photo the title says so and a tap opens it.
  */
-export function teammateCompletedNotice(cityName: string, completedName: string, proofDate?: string | null): Notice {
+export function teammateCompletedNotice(
+  cityName: string,
+  completedName: string,
+  proofDate?: string | null,
+  last = false,
+): Notice {
   const meta: NoticeMeta = {
     type: "teammate_completed",
     category: "social",
     priority: "transactional",
-    variant: proofDate ? "teammate_completed.photo.v1" : "teammate_completed.v1",
+    variant: `teammate_completed.${last ? "last" : "first"}${proofDate ? ".photo" : ""}.v2`,
   };
-  return proofDate
-    ? {
-        title: `📸 ${completedName} posted proof`,
-        body: `${completedName} finished today's goal in ${cityName}.`,
-        categoryId: NotificationCategory.TEAMMATE_COMPLETED,
-        data: { completed_by: completedName, proof_date: proofDate },
-        meta,
-      }
-    : {
-        title: cityName,
-        body: `${completedName} completed today's goal. Your turn!`,
-        categoryId: NotificationCategory.TEAMMATE_COMPLETED,
-        data: { completed_by: completedName },
-        meta,
-      };
-}
-
-/**
- * The same photo, to crewmates who already finished today. Nothing is asked
- * of them, so it's `normal` (budgeted) social, not transactional, and it has
- * no kudos button — they can cheer from the crew list, where the photo is.
- */
-export function proofPostedNotice(cityName: string, completedName: string, proofDate: string): Notice {
   return {
-    title: `📸 ${completedName} posted proof`,
-    body: `${completedName} finished today's goal in ${cityName}. Tap to see the photo.`,
-    data: { completed_by: completedName, proof_date: proofDate },
-    meta: { type: "proof_posted", category: "social", priority: "normal", variant: "proof_posted.v1" },
-  };
-}
-
-export function nextUpNotice(cityName: string, pickerName: string, label: string, days: number): Notice {
-  const span = days === 1 ? "Today's goal builds it." : `It takes ${days} days of everyone completing their goal.`;
-  return {
-    title: `🏗️ Next up: ${withArticle(label)}`,
-    body: `${pickerName} picked ${withArticle(label)} for ${cityName}. ${span}`,
-    meta: crew("next_up", "next_up.v1"),
-  };
-}
-
-export function restoreSpan(days: number): string {
-  return days === 1
-    ? "Today's goal restores it."
-    : `It takes ${days} days of everyone completing their goal.`;
-}
-
-export function restoringNotice(
-  what: "building" | "park",
-  cityName: string,
-  repairerName: string,
-  label: string,
-  days: number,
-): Notice {
-  return what === "park"
-    ? {
-        title: `🌳 Restoring ${withArticle(label)}`,
-        body: `${repairerName} is fixing up ${withArticle(label)} in ${cityName}. ${restoreSpan(days)}`,
-        meta: crew("restoring", "restoring.park.v1"),
-      }
-    : {
-        title: `🧱 Restoring ${withArticle(label)}`,
-        body: `${repairerName} is putting ${withArticle(label)} back up in ${cityName}. ${restoreSpan(days)}`,
-        meta: crew("restoring", "restoring.building.v1"),
-      };
-}
-
-export function buildRescuedNotice(label: string, rescuerName: string): Notice {
-  return {
-    title: `🪖 The ${label} build is back on`,
-    body: `${rescuerName} used a hard hat to save it. Finish today's goal to keep it moving.`,
-    meta: crew("build_rescued", "build_rescued.v1"),
-  };
-}
-
-export function streakRepairedNotice(restoredValue: number, repairerName: string, label: string | null): Notice {
-  return {
-    title: `🧊 ${restoredValue}-day streak repaired`,
-    body: label
-      ? `${repairerName} used a hard hat to bring back your streak and your ${label} build. Finish today's goal to keep it moving.`
-      : `${repairerName} used a hard hat to bring back your streak.`,
-    meta: crew("streak_repaired", "streak_repaired.v1"),
+    title: proofDate ? `📸 ${completedName} posted proof` : `✅ ${completedName} finished`,
+    body: last ? `You're the last one in ${cityName}.` : `Your turn in ${cityName}.`,
+    categoryId: NotificationCategory.TEAMMATE_COMPLETED,
+    data: { completed_by: completedName, ...(proofDate ? { proof_date: proofDate } : {}) },
+    meta,
   };
 }
 

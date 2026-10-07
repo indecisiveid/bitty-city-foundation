@@ -87,7 +87,7 @@ import { runNudges } from "../scheduled";
 import { messageFor } from "../nudgeMessages";
 import { touchLastSeen, COMPLETION_MINUTES_KEPT } from "../presence";
 import { deliverNotice, notifyAllMembers } from "../notify";
-import { cityGrewNotice, kudosNotice } from "../eventMessages";
+import { cityGrewNotice, kudosNotice, teammateCompletedNotice } from "../eventMessages";
 import { sendPush } from "../push";
 
 const fs = jest.requireMock("firebase-admin/firestore") as {
@@ -142,13 +142,13 @@ describe("runNudges — a dormant solo owner", () => {
     await runNudges(EVENING);
     const first = pushesTo("tok-u-nick");
     expect(first).toHaveLength(1);
-    expect(first[0].title).toBe("👋 We'll stop reminding you");
-    expect(first[0].body).toContain("Your city Bitty Philly will be waiting");
+    expect(first[0].title).toBe("👋 Pausing reminders");
+    expect(first[0].body).toBe("Bitty Philly will be here when you're back.");
     expect(first[0].data).toEqual({
       group_id: "Bitty Philly",
       group_name: "Bitty Philly",
       type: "farewell",
-      variant: "farewell.v1",
+      variant: "farewell.v2",
     });
 
     // Recorded on the shared notice ledger as well as the reminder state.
@@ -175,7 +175,7 @@ describe("runNudges — a dormant solo owner", () => {
     await runNudges(LAST_CALL);
     const all = pushesTo("tok-u-nick");
     expect(all).toHaveLength(2);
-    expect(all[1].title).toBe("⏳ Last call");
+    expect(all[1].title).toBe("⏳ Last call: 3-day streak");
   });
 });
 
@@ -191,21 +191,19 @@ describe("runNudges — a cooling member of a crew", () => {
     seedUser("u-jen", { last_seen_at: daysBefore(EVENING, 0) });
   });
 
-  it("hears nothing in the morning or at midday", async () => {
+  it("hears nothing in the morning or at midday — there are no such slots any more", async () => {
     await runNudges(MORNING);
     await runNudges(MIDDAY);
-    expect(pushesTo("tok-u-amit")).toHaveLength(0);
-    expect(group("Amitopolis").reminders_sent_slots).toEqual(["morning", "midday"]);
-    // Jennifer is done: nobody pushes her either.
-    expect(pushesTo("tok-u-jen")).toHaveLength(0);
+    expect(sent).not.toHaveBeenCalled();
+    expect(group("Amitopolis").reminders_sent_slots).toBeUndefined();
   });
 
   it("gets one evening push naming the friend who is done, then hits the cap at last call", async () => {
     await runNudges(EVENING);
     const evening = pushesTo("tok-u-amit");
     expect(evening).toHaveLength(1);
-    expect(evening[0].body.startsWith("Jennifer already checked in — you're the last one. ")).toBe(true);
-    expect(evening[0].body).toContain("3-day streak");
+    expect(evening[0].title).toBe("🔥 3-day streak on the line");
+    expect(evening[0].body).toBe("Jennifer finished — you're the last one in Amitopolis.");
     expect((user("u-amit").reminders as Record<string, unknown>).sent).toBe(1);
 
     await runNudges(LAST_CALL);
@@ -213,8 +211,8 @@ describe("runNudges — a cooling member of a crew", () => {
     // Jennifer (active, done) is the chaser at last call and is not capped.
     const jen = pushesTo("tok-u-jen");
     expect(jen).toHaveLength(1);
-    expect(jen[0].title).toBe("⏳ Last call for the crew");
-    expect(jen[0].body).toContain("Amit hasn't");
+    expect(jen[0].title).toBe("⏳ Waiting on Amit");
+    expect(jen[0].body).toBe("A nudge could save the 3-day streak in Amitopolis.");
   });
 });
 
@@ -239,7 +237,6 @@ describe("runNudges — active and unknown-presence members are untouched", () =
       {
         cityName: "Scope Creep",
         streak: 2,
-        build: null,
         pendingNames: ["Christian"],
         completedNames: ["David"],
         landsToday: "Cottage",
@@ -247,28 +244,27 @@ describe("runNudges — active and unknown-presence members are untouched", () =
     );
     expect(p.title).toBe(expected.title);
     expect(p.body).toBe(expected.body);
-    expect(p.body).toContain("Finish today and your Cottage lands tonight.");
     expect(p.data).toEqual({
       group_id: "Scope Creep",
       group_name: "Scope Creep",
       type: "reminder",
-      variant: "reminder.evening.streak",
+      variant: "reminder.evening.streak.v2",
     });
   });
 
   it("treats a member with no presence stamp as active rather than farewelling them", async () => {
     // Flip who is pending so the unstamped user is the recipient.
     group("Scope Creep").completions_today = ["Christian"];
-    await runNudges(MORNING);
+    await runNudges(EVENING);
     const p = pushesTo("tok-u-dav");
     expect(p).toHaveLength(1);
-    expect(p[0].title).not.toContain("stop reminding");
+    expect(p[0].title).not.toContain("Pausing reminders");
     expect((user("u-dav").reminders as Record<string, unknown>).sent).toBe(1);
   });
 });
 
 describe("runNudges — solo cities and quiet slots", () => {
-  it("does not even claim the midday slot for an active solo city", async () => {
+  it("claims nothing at midday for an active solo city", async () => {
     seedGroup("Floresta", { group_members: ["Larissa"], member_uids: ["u-lar"] });
     seedUser("u-lar", { last_seen_at: daysBefore(MIDDAY, 0) });
     await runNudges(MIDDAY);
@@ -325,7 +321,7 @@ describe("deliverNotice — every event push goes through the policy", () => {
     seedUser("u-a", { last_seen_at: daysBefore(EVENING, 0) });
     expect(await deliverNotice(["u-a"], grew, { ...NY, now: EVENING })).toEqual(["u-a"]);
     const [p] = pushesTo("tok-u-a") as Array<{ data: Record<string, string>; quiet?: boolean }>;
-    expect(p.data).toMatchObject({ type: "city_grew", variant: "city_grew.v1" });
+    expect(p.data).toMatchObject({ type: "city_grew", variant: "city_grew.v2" });
     expect(p.quiet).toBe(false);
     expect(user("u-a").notices).toEqual({ date: TODAY, counts: { crew: 1 }, keys: {} });
   });
@@ -361,5 +357,59 @@ describe("deliverNotice — every event push goes through the policy", () => {
     const [p] = pushesTo("tok-u-jen") as Array<{ threadId?: string; data: Record<string, string> }>;
     expect(p.threadId).toBe("Riverside");
     expect(p.data).toMatchObject({ group_id: "Riverside", group_name: "Riverside", type: "city_grew" });
+  });
+});
+
+describe("the daily cap and the teammate quiet window", () => {
+  beforeEach(() => {
+    seedGroup("Riverside", {
+      group_members: ["Amit", "Jen", "Sam"],
+      member_uids: ["u-amit", "u-jen", "u-sam"],
+      completions_today: ["Jen"],
+      streak: 3,
+    });
+    for (const uid of ["u-amit", "u-jen", "u-sam"]) seedUser(uid, { last_seen_at: daysBefore(EVENING, 0) });
+  });
+
+  it("skips the evening reminder when Jen's 'your turn' reached them in the last 3 hours", async () => {
+    const twoHoursAgo = new Date(EVENING.getTime() - 2 * 3_600_000);
+    const n = teammateCompletedNotice("Riverside", "Jen");
+    const { meta, ...payload } = n;
+    await deliverNotice(["u-amit"], { ...payload, data: { ...payload.data, group_id: "Riverside" }, meta }, {
+      timezone: "America/New_York",
+      now: twoHoursAgo,
+    });
+    expect((user("u-amit").notices as { turns: Record<string, string> }).turns.Riverside).toBe(twoHoursAgo.toISOString());
+    sent.mockClear();
+
+    await runNudges(EVENING);
+    // Amit was pinged two hours ago — skipped. Sam was not — reminded.
+    expect(pushesTo("tok-u-amit")).toHaveLength(0);
+    expect(pushesTo("tok-u-sam")).toHaveLength(1);
+    // The city still claims the slot; the skip is per person.
+    expect(group("Riverside").reminders_sent_slots).toEqual(["evening"]);
+  });
+
+  it("a ping more than 3 hours old doesn't hold the reminder back", async () => {
+    const fourHoursAgo = new Date(EVENING.getTime() - 4 * 3_600_000);
+    user("u-amit").notices = { date: TODAY, counts: { social: 1 }, keys: {}, turns: { Riverside: fourHoursAgo.toISOString() } };
+    await runNudges(EVENING);
+    expect(pushesTo("tok-u-amit")).toHaveLength(1);
+  });
+
+  it("holds a reminder back once the person has had their four pushes today", async () => {
+    user("u-amit").notices = { date: TODAY, counts: { social: 3, crew: 1 }, keys: {} };
+    await runNudges(EVENING);
+    expect(pushesTo("tok-u-amit")).toHaveLength(0);
+    expect(pushesTo("tok-u-sam")).toHaveLength(1);
+  });
+
+  it("never holds back the meteor", async () => {
+    group("Riverside").last_activity_date = "2026-09-16"; // idle 6 days → lands tomorrow
+    group("Riverside").completions_today = [];
+    user("u-amit").notices = { date: TODAY, counts: { social: 4 }, keys: {} };
+    await runNudges(EVENING);
+    const [p] = pushesTo("tok-u-amit");
+    expect(p.title).toBe("☄️ Meteor incoming");
   });
 });

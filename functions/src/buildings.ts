@@ -1,6 +1,6 @@
 /**
  * Human-readable names for building types. Shared by the callables (the
- * "city grew" push) and the scheduler (the morning "Day X of Y" nudge) so a
+ * "city grew" push) and the scheduler (the "lands tonight" reminder) so a
  * building is never called two different things in two different pushes.
  */
 import { daysFor, labelFor } from "./buildCatalog";

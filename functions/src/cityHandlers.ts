@@ -70,7 +70,7 @@ export const updateCitySettings = onCall({ enforceAppCheck: true }, async (reque
         type: "city_settings",
         category: "crew",
         priority: "normal",
-        variant: updates.daily_goal !== undefined ? "city_settings.goal.v1" : "city_settings.renamed.v1",
+        variant: "city_settings.goal.v2",
       }),
       callerName,
     );

@@ -116,13 +116,6 @@ export function questCompletedNotice(q: Quest, cityName: string, placedBuild: st
   };
 }
 
-/** Appended to a daily reminder while a quest runs: the stake, in one clause. */
-export function questReminderClause(q: Quest | null, today: string): string {
-  if (!q || q.status !== "active" || today > q.ends_on) return "";
-  const when = q.ends_on === today ? "ends today" : "is on";
-  return ` The ${QUEST_TITLE[q.id].replace(/!$/, "")} ${when}.`;
-}
-
 /** The quest with the words the app shows — refreshed on every write. */
 export function withDisplay(q: Quest): Quest {
   return {

@@ -22,7 +22,7 @@
  * escalated by urgency in reminderLogic.
  *
  * Each group has its own timezone, so a single global
- * tick can't "be 8am" for everyone at once — instead every run asks each group
+ * tick can't "be 17:30" for everyone at once — instead every run asks each group
  * "is it one of your nudge slots right now?" (decideNudge), and only the
  * matching slot fires. A per-slot guard (`reminders_sent_slots`, scoped to
  * `reminders_sent_date`) keeps it to one send per slot per game-day even if a
@@ -53,8 +53,8 @@ import { DateTime } from "luxon";
 import { getProcessingDate, daysBetween } from "./gameLogic";
 import { decideNudge, SlotId } from "./reminderLogic";
 import { loadUsers, notifySnaps, recordSent, uidsForNames } from "./notify";
-import { NoticeMeta } from "./notices";
-import { buildProgressOf, landingTodayLabel } from "./buildings";
+import { NoticeMeta, capAllows, ledgerOf, recentlyPinged } from "./notices";
+import { landingTodayLabel } from "./buildings";
 import { consolidate, farewellMessage, NudgeEntry } from "./nudgeMessages";
 import { applyUserTier, reminderStateOf, sentTodayOf, tierFor } from "./reminderTiers";
 import { idleDaysFor } from "./presence";
@@ -62,7 +62,6 @@ import { activeMembersOn, isDayPaused, rosterOf } from "./pauses";
 import { normalizeGameMode } from "./gameMode";
 import { dueForDayProcessing, maybeProcessDay } from "./groupHandlers";
 import { runQuests } from "./questRunner";
-import { questReminderClause } from "./questMessages";
 
 // Re-exported: the copy moved to nudgeMessages.ts, callers and tests did not.
 export { messageFor } from "./nudgeMessages";
@@ -180,12 +179,10 @@ export async function runNudges(now: Date = new Date()): Promise<void> {
       const ctx = {
         cityName,
         streak: data.streak ?? 0,
-        build: buildProgressOf(data.current_build),
         pendingNames: incomplete,
         // Completion order, so "Amit already checked in" names the first one in.
         completedNames: completions,
         landsToday: landingTodayLabel(data.current_build),
-        questClause: questReminderClause(data.quest ?? null, todayGameDate),
       };
       const base = { groupId: doc.id, cityName, nudge, ctx, gameDate: todayGameDate };
 
@@ -226,13 +223,20 @@ export async function runNudges(now: Date = new Date()): Promise<void> {
       // A person in cities on different clocks: key the daily cap on the date
       // of the city that woke them this tick. Good enough at this scale.
       const todayDate = entries[0].gameDate ?? now.toISOString().slice(0, 10);
-      const decision = applyUserTier(entries, tier, state, todayDate);
+      // A teammate's "your turn" push in the last few hours already said
+      // what this reminder would. The meteor and the chaser still go.
+      const ledger = ledgerOf(user.notices);
+      const fresh = entries.filter(
+        (e) => e.nudge.kind === "meteor" || e.role === "done" || !recentlyPinged(ledger, e.groupId, now),
+      );
+      if (fresh.length === 0) return;
+      const decision = applyUserTier(fresh, tier, state, todayDate);
       if (decision.action === "skip") return;
 
       const sentToday = sentTodayOf(state, todayDate);
       if (decision.action === "farewell") {
         const cities = [...new Set(entries.map((e) => e.cityName))];
-        const meta: NoticeMeta = { type: "farewell", category: "reminder", priority: "normal", variant: "farewell.v1" };
+        const meta: NoticeMeta = { type: "farewell", category: "reminder", priority: "normal", variant: "farewell.v2" };
         const single: Partial<ReturnType<typeof cityContext>> = entries.length === 1 ? cityContext(entries[0]) : {};
         if (userSnap) {
           await notifySnaps([userSnap], {
@@ -253,6 +257,8 @@ export async function runNudges(now: Date = new Date()): Promise<void> {
       const payload = consolidate(decision.entries);
       if (!payload) return;
       const meta = reminderMeta(decision.entries);
+      // The per-person daily cap (notices.capAllows) — a meteor is exempt.
+      if (!capAllows(meta, ledger, todayDate)) return;
       if (userSnap) {
         // One city: stack it with that city's other notifications on iOS and
         // let a tap open it (the multi-city push lands on Home by design).
@@ -281,14 +287,19 @@ function cityContext(e: NudgeEntry): { threadId: string; data: Record<string, st
  * compared the same way widget taps are.
  */
 export function reminderMeta(entries: NudgeEntry[]): NoticeMeta {
-  const base = { type: "reminder", category: "reminder" as const, priority: "normal" as const };
-  if (entries.length === 1) {
-    const e = entries[0];
-    return { ...base, variant: `reminder.${e.nudge.slot}.${e.nudge.kind}${e.role === "done" ? ".chaser" : ""}` };
-  }
   const rank = { meteor: 3, streak: 2, reminder: 1 } as const;
   const worst = entries.reduce((a, b) => (rank[b.nudge.kind] > rank[a.nudge.kind] ? b : a));
-  return { ...base, variant: `reminder.multi.${worst.nudge.kind}` };
+  // The meteor costs buildings — it is the one reminder the daily cap never holds back.
+  const base = {
+    type: "reminder",
+    category: "reminder" as const,
+    priority: worst.nudge.kind === "meteor" ? ("important" as const) : ("normal" as const),
+  };
+  if (entries.length === 1) {
+    const e = entries[0];
+    return { ...base, variant: `reminder.${e.nudge.slot}.${e.nudge.kind}${e.role === "done" ? ".chaser" : ""}.v2` };
+  }
+  return { ...base, variant: `reminder.multi.${worst.nudge.kind}.v2` };
 }
 
 /** Persist what this person was sent today (`users/{uid}.reminders`). Best-effort. */
@@ -305,7 +316,7 @@ async function recordReminder(
   }
 }
 
-// Every 30 minutes — the :30 slots (11:30, 17:30) need half-hour granularity.
+// Every 30 minutes — the 17:30 slot needs half-hour granularity.
 // The per-group timezone math inside decides who actually fires.
 //
 // Still exported as `dailyNudge`: that is the deployed function's name, and

@@ -42,7 +42,7 @@ import { notifyAllMembers } from "./notify";
 import { notice } from "./eventMessages";
 import { NoticeMeta } from "./notices";
 
-const pauseMeta = (type: string): NoticeMeta => ({ type, category: "crew", priority: "normal", variant: `${type}.v1` });
+const pauseMeta = (type: string): NoticeMeta => ({ type, category: "crew", priority: "normal", variant: `${type}.v2` });
 import { groupToResponse } from "./utils";
 import { requireAuth } from "./auth";
 

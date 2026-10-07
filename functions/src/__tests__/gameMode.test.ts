@@ -24,7 +24,7 @@ import {
 import { processEndOfDay, CityMap } from "../gameLogic";
 import { buildProgressOf } from "../buildings";
 import { decideNudge, NudgeInput, REMINDER_SLOTS } from "../reminderLogic";
-import { modeChangedMessage, easyModeSuggestionMessage } from "../crewMessages";
+import { easyModeSuggestionMessage } from "../crewMessages";
 
 const MEMBERS = ["alice", "bob", "carol", "dave"];
 const TODAY = "2026-05-04";
@@ -362,14 +362,10 @@ describe("decideNudge — easy mode streak rule", () => {
 });
 
 describe("mode copy", () => {
-  it("states the new rule as a number of people", () => {
-    expect(modeChangedMessage("Riley", "Riverside", "easy", 4).body).toContain("at least 1 of 4");
-    expect(modeChangedMessage("Riley", "Riverside", "hard", 4).body).toContain("all 4 of you");
-  });
-
   it("the suggestion explains easy mode in the agreed words", () => {
-    const m = easyModeSuggestionMessage("Riverside", 3, 7);
-    expect(m.body).toContain("3 of the last 7 days");
-    expect(m.body).toContain("at least 1 person needs to complete your goal to make progress");
+    const m = easyModeSuggestionMessage("Riverside");
+    expect(m.title).toBe("Hard mode's been rough in Riverside");
+    expect(m.body).toBe("In easy mode, at least 1 person needs to complete your goal to make progress.");
   });
 });
+

@@ -204,9 +204,10 @@ async function fireSchedule(name = 'dailyNudge') {
 
 /**
  * A fixed-offset IANA zone in which the current wall clock falls inside the
- * given reminder slot's 30-minute window. Slots start at :00 (morning 08:00,
- * lastCall 21:00) or :30 (midday 11:30, evening 17:30), so with whole-hour
- * offsets the UTC minute decides which pair is reachable right now; the hour
+ * given reminder slot's 30-minute window. Slots start at :00 (lastCall 21:00)
+ * or :30 (evening 17:30) — and the retired 08:00 / 11:30 slots are kept here as
+ * times that must stay quiet — so with whole-hour offsets the UTC minute
+ * decides which pair is reachable right now; the hour
  * is then a matter of picking the offset. `Etc/GMT+5` means UTC-5 (POSIX sign).
  */
 function zoneInSlot(slotMinutes) {
@@ -224,7 +225,7 @@ const SLOT = { morning: 8 * 60, midday: 11 * 60 + 30, evening: 17 * 60 + 30, las
 function localYmd(zone) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 }
-/** The late slot (evening/lastCall) and the early slot (morning/midday) reachable this minute. */
+/** The live slot (evening/lastCall) and the retired one (morning/midday) reachable this minute. */
 function reachableSlots() {
   const late = new Date().getUTCMinutes() >= 30 ? 'evening' : 'lastCall';
   const early = new Date().getUTCMinutes() >= 30 ? 'midday' : 'morning';
@@ -1311,7 +1312,7 @@ async function main() {
   check('presence: …and refreshes last_seen_at', new Date(bobF3.last_seen_at?.timestampValue ?? 0) > new Date(Date.now() - 60000), JSON.stringify(bobF3.last_seen_at));
   await call('deleteGroup', { group_id: dormantCity.group_id }, bob);
 
-  // A solo city in an EARLY slot decides nothing at all — no claim, no push.
+  // At a retired slot time (08:00 / 11:30) a city decides nothing at all — no claim, no push.
   const earlyZone = zoneInSlot(SLOT[earlySlot]);
   const quietCity = (await call(
     'createGroup',
@@ -1320,7 +1321,7 @@ async function main() {
   )).result;
   await fireSchedule();
   const quietDoc = await readDoc(`groups/${quietCity.group_id}`, eve);
-  check(`reminders: solo city stays quiet at ${earlySlot} (${earlyZone})`, quietDoc.body?.fields?.reminders_sent_slots === undefined, JSON.stringify(quietDoc.body?.fields?.reminders_sent_slots));
+  check(`reminders: a city stays quiet at the retired ${earlySlot} time (${earlyZone})`, quietDoc.body?.fields?.reminders_sent_slots === undefined, JSON.stringify(quietDoc.body?.fields?.reminders_sent_slots));
   const eveDoc = await readDoc(`users/${eve.uid}`, eve);
   check('reminders: …and its owner was sent nothing', eveDoc.body?.fields?.reminders === undefined, JSON.stringify(eveDoc.body?.fields?.reminders));
   await call('deleteGroup', { group_id: quietCity.group_id }, eve);

@@ -19,11 +19,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { applyBuildRescue, getProcessingDate } from "./gameLogic";
 import { memberNameForUid, maybeProcessDay } from "./groupHandlers";
-import { activeMembersOn, rosterOf } from "./pauses";
 import { GameMode, isGameMode, normalizeGameMode } from "./gameMode";
-import { modeChangedMessage } from "./crewMessages";
-import { notifyAllMembers } from "./notify";
-import { notice } from "./eventMessages";
 import { groupToResponse } from "./utils";
 import { requireAuth } from "./auth";
 
@@ -90,20 +86,7 @@ export const setGameMode = onCall({ enforceAppCheck: true }, async (request) => 
   await groupRef.update(updates);
   const after: FirebaseFirestore.DocumentData = { ...data, ...updates };
 
-  if (before !== mode) {
-    const activeCount = activeMembersOn(rosterOf(after), today).length;
-    await notifyAllMembers(
-      group_id,
-      after,
-      notice(modeChangedMessage(callerName, after.group_name ?? "your city", mode, activeCount), {
-        type: "mode_changed",
-        category: "crew",
-        priority: "normal",
-        variant: `mode_changed.${mode}.v1`,
-      }),
-      callerName,
-    );
-  }
+  // No push for the switch itself — the crew sees the mode in the city.
 
   return groupToResponse(group_id, after);
 });

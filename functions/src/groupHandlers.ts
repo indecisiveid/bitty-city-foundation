@@ -34,7 +34,7 @@ import {
 } from "./utils";
 import { requireAuth } from "./auth";
 import { notifyMembers, notifyAllMembers } from "./notify";
-import { notice, cityGrewNotice, buildStalledNotice, teammateCompletedNotice, proofPostedNotice, nextUpNotice, restoringNotice, buildRescuedNotice, streakRepairedNotice } from "./eventMessages";
+import { notice, cityGrewNotice, buildStalledNotice, teammateCompletedNotice } from "./eventMessages";
 import { onBuildStarted, onCompletion, onJoin, onLanding, salePeekAllows, Quest } from "./quests";
 import { afterQuestCompleted, afterQuestProgress, questWrite } from "./questRunner";
 import { touchLastSeen, localMinutesOf } from "./presence";
@@ -47,7 +47,6 @@ import {
   GameMode,
   LEGACY_GAME_MODE,
   ModeSuggestion,
-  NEAR_MISS_WINDOW_DAYS,
   dayShare,
   isBuildFinished,
   isGameMode,
@@ -443,8 +442,8 @@ export async function maybeSuggestEasyMode(
     groupId,
     merged,
     notice(
-      easyModeSuggestionMessage(merged.group_name ?? "your city", suggestion.near_misses, NEAR_MISS_WINDOW_DAYS),
-      { type: "mode_suggestion", category: "crew", priority: "normal", variant: "mode_suggestion.v1" },
+      easyModeSuggestionMessage(merged.group_name ?? "your city"),
+      { type: "mode_suggestion", category: "crew", priority: "normal", variant: "mode_suggestion.v2" },
     ),
   );
   return merged;
@@ -673,7 +672,7 @@ export const joinGroup = onCall({ enforceAppCheck: true }, async (request) => {
       others,
       notice(
         joinedMessage(joinedName, finalData.group_name ?? "your city", (finalData.group_members ?? []).length),
-        { type: "member_joined", category: "crew", priority: "normal", variant: "member_joined.v1" },
+        { type: "member_joined", category: "crew", priority: "normal", variant: "member_joined.v2" },
       ),
     );
     // Invite quest moved: the crew (not the friend who just joined) hears it.
@@ -716,32 +715,26 @@ export const getGroup = onCall({ enforceAppCheck: true }, async (request) => {
 /**
  * Copy for "everyone finished today". Three flavours, because the moment
  * means different things depending on where the build is:
- *   - final day of a multi-day build → the building is done, enjoy it
- *   - mid multi-day build            → day banked, next commitment day incoming
+ *   - final day of a multi-day build → the building is done
+ *   - mid multi-day build            → day banked
  *   - single-day build or no build   → plain crew congratulations
+ * `photos` is how many proof photos the crew posted today. The crewmates who
+ * finished early no longer get a push per photo, so this is where they hear.
  */
-export function dayCompleteMessage(data: FirebaseFirestore.DocumentData) {
+export function dayCompleteMessage(data: FirebaseFirestore.DocumentData, photos = 0) {
   const cityName = data.group_name ?? "your city";
   const build = buildProgressOf(data.current_build);
+  const seePhotos = photos > 0 ? ` ${photos} ${photos === 1 ? "photo" : "photos"} to see.` : "";
 
   if (build) {
     const { dayNumber, daysRequired, label } = build;
     if (dayNumber >= daysRequired) {
-      return {
-        title: "🎉 Everyone's in — build complete!",
-        body: `That's all ${daysRequired} days. Your ${label} is finished — enjoy the new addition to ${cityName}.`,
-      };
+      return { title: "🎉 Everyone's in — build complete!", body: `Your ${label} is finished.${seePhotos}` };
     }
-    return {
-      title: "🎉 Everyone's in!",
-      body: `Day ${dayNumber} of ${daysRequired} banked toward your ${label}. Next commitment day is tomorrow — keep it going.`,
-    };
+    return { title: "🎉 Everyone's in", body: `Day ${dayNumber} of ${daysRequired} banked for your ${label}.${seePhotos}` };
   }
 
-  return {
-    title: "🎉 Everyone's in!",
-    body: `The whole crew completed today's goal in ${cityName}. Next commitment day is tomorrow.`,
-  };
+  return { title: "🎉 Everyone's in", body: `The whole crew finished in ${cityName}.${seePhotos}` };
 }
 
 export const completeGoal = onCall({ enforceAppCheck: true }, async (request) => {
@@ -938,35 +931,37 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     const filedOn: string = finalData!.proofs_today?.date ?? today;
     const proofDate = proofEntry.status === "photo" ? filedOn : null;
     if (stillPending.length > 0) {
-      await notifyMembers(
-        group_id,
-        finalData!,
-        stillPending,
-        teammateCompletedNotice(cityName, completedName, proofDate),
-      );
-      // Crewmates who already finished don't get "your turn" — but they do
-      // want to see the photo.
-      const alreadyDone = done.filter((m) => m !== completedName);
-      if (proofDate && alreadyDone.length > 0) {
-        await notifyMembers(group_id, finalData!, alreadyDone, proofPostedNotice(cityName, completedName, proofDate));
+      // "Your turn" goes out twice a day at most: when the FIRST teammate
+      // finishes (the day is moving) and when only ONE person is left (it's
+      // on them). Finishes in between are silent — each one used to ping
+      // everyone still pending, and that was most of a crew's daily pushes.
+      // Crewmates who already finished hear nothing until everyone's in.
+      const first = done.length === 1;
+      const last = stillPending.length === 1;
+      if (first || last) {
+        await notifyMembers(
+          group_id,
+          finalData!,
+          stillPending,
+          teammateCompletedNotice(cityName, completedName, proofDate, last),
+        );
       }
     } else {
       // That was the last one — the whole crew is in. Celebrate the day and
       // point at what's next. If this completion landed the build, the copy
-      // already says so (dayCompleteMessage reads the build before it was
-      // cleared? — no: it reads `finalData`, so pass the pre-landing build).
+      // already says so — pass the pre-landing build so it can.
       // If anyone posted a photo today, a tap opens the whole day's proof.
-      const dayNotice = notice(dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!), {
-        type: "day_complete",
-        category: "crew",
-        priority: "normal",
-        variant: landedBuild ? "day_complete.landed.v1" : "day_complete.v1",
-      });
-      await notifyAllMembers(
-        group_id,
-        finalData!,
-        photoCount(finalData!.proofs_today, filedOn) > 0 ? { ...dayNotice, data: { proof_date: filedOn } } : dayNotice,
+      const photos = photoCount(finalData!.proofs_today, filedOn);
+      const dayNotice = notice(
+        dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!, photos),
+        {
+          type: "day_complete",
+          category: "crew",
+          priority: "normal",
+          variant: landedBuild ? "day_complete.landed.v2" : "day_complete.v2",
+        },
       );
+      await notifyAllMembers(group_id, finalData!, photos > 0 ? { ...dayNotice, data: { proof_date: filedOn } } : dayNotice);
     }
   }
 
@@ -1011,12 +1006,11 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
 
   // Who picked, so the rest of the crew can be told. Set inside the
   // transaction so a losing racer (build already in progress) never notifies.
-  let pickerName: string | null = null;
 
   await db().runTransaction(async (tx) => {
     const freshSnap = await tx.get(groupRef);
     const freshData = freshSnap.data()!;
-    const member = memberNameForUid(freshData, uid);
+    memberNameForUid(freshData, uid); // membership check (throws for non-members)
 
     if (freshData.current_build !== null) {
       throw new HttpsError("failed-precondition", "A build is already in progress");
@@ -1065,19 +1059,11 @@ export const selectBuild = onCall({ enforceAppCheck: true }, async (request) => 
     // Choosing a new build gives up any stalled one still on offer.
     tx.update(groupRef, { current_build: newBuild, abandoned_build: null, ...(questStep?.updates ?? {}) });
     finalData = { ...freshData, current_build: newBuild, abandoned_build: null, ...(questStep?.updates ?? {}) };
-    pickerName = member;
   });
 
-  // "Someone picked the next build" push → tell the rest of the crew what
-  // they're working toward. Best-effort, after the write.
-  if (pickerName) {
-    await notifyAllMembers(
-      group_id,
-      finalData!,
-      nextUpNotice(finalData!.group_name ?? "your city", pickerName, labelFor(type), finalData!.current_build?.days_required ?? daysFor(type)!),
-      pickerName,
-    );
-  }
+  // No push: the crew sees it the next time they open the city. Info-only
+  // pushes (next up, restoring, rescued, repaired) were cut in October 2026
+  // to keep a crew's day under the per-person cap for the ones that matter.
 
   return groupToResponse(group_id, finalData!);
 });
@@ -1144,13 +1130,11 @@ export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
   const groupRef = await loadSettled(group_id, uid);
 
   let finalData: FirebaseFirestore.DocumentData;
-  let repairerName: string | null = null;
-  let repairedType = "";
 
   await db().runTransaction(async (tx) => {
     const freshSnap = await tx.get(groupRef);
     const freshData = freshSnap.data()!;
-    const member = memberNameForUid(freshData, uid);
+    memberNameForUid(freshData, uid); // membership check (throws for non-members)
     assertBuildSlotFree(freshData);
 
     const cell = freshData.city_map?.[String(row)]?.[col];
@@ -1181,19 +1165,11 @@ export const repairTile = onCall({ enforceAppCheck: true }, async (request) => {
     // picking a new build does — there is only ever one build slot.
     tx.update(groupRef, { current_build: newBuild, abandoned_build: null });
     finalData = { ...freshData, current_build: newBuild, abandoned_build: null };
-    repairerName = member;
-    repairedType = type;
   });
 
-  if (repairerName) {
-    const label = labelFor(repairedType);
-    await notifyAllMembers(
-      group_id,
-      finalData!,
-      restoringNotice("building", finalData!.group_name ?? "your city", repairerName, label, RESTORE_BUILDING_DAYS),
-      repairerName,
-    );
-  }
+  // No push: the crew sees it the next time they open the city. Info-only
+  // pushes (next up, restoring, rescued, repaired) were cut in October 2026
+  // to keep a crew's day under the per-person cap for the ones that matter.
 
   return groupToResponse(group_id, finalData!);
 });
@@ -1209,14 +1185,13 @@ export const repairPark = onCall({ enforceAppCheck: true }, async (request) => {
   const groupRef = await loadSettled(group_id, uid);
 
   let finalData: FirebaseFirestore.DocumentData;
-  let repairerName: string | null = null;
   let parkType = "";
   let days = 0;
 
   await db().runTransaction(async (tx) => {
     const freshSnap = await tx.get(groupRef);
     const freshData = freshSnap.data()!;
-    const member = memberNameForUid(freshData, uid);
+    memberNameForUid(freshData, uid); // membership check (throws for non-members)
     assertBuildSlotFree(freshData);
 
     const park = normalizeParks(freshData.parks).find((pk) => pk.park_id === park_id);
@@ -1239,18 +1214,11 @@ export const repairPark = onCall({ enforceAppCheck: true }, async (request) => {
 
     tx.update(groupRef, { current_build: newBuild, abandoned_build: null });
     finalData = { ...freshData, current_build: newBuild, abandoned_build: null };
-    repairerName = member;
   });
 
-  if (repairerName) {
-    const label = labelFor(parkType);
-    await notifyAllMembers(
-      group_id,
-      finalData!,
-      restoringNotice("park", finalData!.group_name ?? "your city", repairerName, label, days),
-      repairerName,
-    );
-  }
+  // No push: the crew sees it the next time they open the city. Info-only
+  // pushes (next up, restoring, rescued, repaired) were cut in October 2026
+  // to keep a crew's day under the per-person cap for the ones that matter.
 
   return groupToResponse(group_id, finalData!);
 });
@@ -1289,8 +1257,6 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
     data.goal_reset_timezone ?? "UTC",
   );
 
-  let rescuerName: string | null = null;
-  let buildType = "";
   let finalData: FirebaseFirestore.DocumentData;
 
   await db().runTransaction(async (tx) => {
@@ -1323,19 +1289,11 @@ export const rescueBuild = onCall({ enforceAppCheck: true }, async (request) => 
 
     tx.update(groupRef, rescued);
     finalData = { ...freshData, ...rescued };
-    rescuerName = member;
-    buildType = rescued.current_build.type;
   });
 
-  if (rescuerName) {
-    const label = labelFor(buildType);
-    await notifyAllMembers(
-      group_id,
-      finalData!,
-      buildRescuedNotice(label, rescuerName),
-      rescuerName,
-    );
-  }
+  // No push: the crew sees it the next time they open the city. Info-only
+  // pushes (next up, restoring, rescued, repaired) were cut in October 2026
+  // to keep a crew's day under the per-person cap for the ones that matter.
 
   return groupToResponse(group_id, finalData!);
 });
@@ -1379,9 +1337,6 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
   const groupRef = await loadSettled(group_id, uid);
 
   let finalData: FirebaseFirestore.DocumentData;
-  let repairerName: string | null = null;
-  let restoredValue = 0;
-  let resumedType: string | null = null;
 
   // Transactional: a paid repair spends a freeze, and two members tapping at
   // once must not spend two.
@@ -1429,20 +1384,11 @@ export const repairStreak = onCall({ enforceAppCheck: true }, async (request) =>
 
     tx.update(groupRef, repaired);
     finalData = { ...fresh, ...repaired };
-    repairerName = member;
-    restoredValue = brokenStreak?.value ?? 0;
-    resumedType = repaired.current_build?.type ?? null;
   });
 
-  if (repairerName && paid) {
-    const label = resumedType ? labelFor(resumedType) : null;
-    await notifyAllMembers(
-      group_id,
-      finalData!,
-      streakRepairedNotice(restoredValue, repairerName, label ?? null),
-      repairerName,
-    );
-  }
+  // No push: the crew sees it the next time they open the city. Info-only
+  // pushes (next up, restoring, rescued, repaired) were cut in October 2026
+  // to keep a crew's day under the per-person cap for the ones that matter.
 
   return groupToResponse(group_id, finalData!);
 });
@@ -1526,7 +1472,7 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
         type: "member_left",
         category: "crew",
         priority: "normal",
-        variant: "member_left.v1",
+        variant: "member_left.v2",
       }),
     );
   }

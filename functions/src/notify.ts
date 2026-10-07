@@ -131,7 +131,7 @@ export async function deliverNotice(
       delivered.push(snap.id);
       // update(), not set-merge: a new day's counts must REPLACE yesterday's.
       await snap.ref
-        .update({ notices: recordNotice(ledger, meta, today) })
+        .update({ notices: recordNotice(ledger, meta, today, turnOf(meta, payload.data, now)) })
         .catch((err) => console.error("[notify] ledger write failed", snap.id, err));
     }
   } catch (err) {
@@ -141,6 +141,12 @@ export async function deliverNotice(
 }
 
 /** Record something sent outside deliverNotice (the scheduled reminders) on the same ledger. */
+/** A teammate's "your turn" push is stamped against its city (notices.recentlyPinged). */
+function turnOf(meta: NoticeMeta, data: Record<string, unknown> | undefined, at: Date) {
+  const groupId = data?.group_id;
+  return meta.type === "teammate_completed" && typeof groupId === "string" ? { groupId, at } : undefined;
+}
+
 export async function recordSent(
   snap: UserSnap,
   meta: NoticeMeta,

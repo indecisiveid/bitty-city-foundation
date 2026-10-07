@@ -1,19 +1,14 @@
 /**
- * Every event push, now a labelled Notice. Pins the words that moved out of
- * the handlers (unchanged), and the labels the policy and the app rely on.
+ * Every event push, as a labelled Notice. Pins the words (October 2026 short
+ * copy) and the labels the policy and the app rely on.
  */
 import {
-  buildRescuedNotice,
   buildStalledNotice,
   cityGrewNotice,
   kudosNotice,
-  nextUpNotice,
   notice,
   peerNudgeNotice,
-  restoringNotice,
-  streakRepairedNotice,
   teammateCompletedNotice,
-  proofPostedNotice,
   testNotice,
 } from "../eventMessages";
 import { NotificationCategory } from "../push";
@@ -22,9 +17,12 @@ describe("event notices keep their words", () => {
   it("city grew / restored", () => {
     expect(cityGrewNotice("Riverside", "Cottage", false)).toMatchObject({
       title: "🏙️ Riverside grew!",
-      body: "Your crew finished a Cottage. Come see it in the city.",
+      body: "Your crew built a Cottage.",
     });
-    expect(cityGrewNotice("Riverside", "Apartments", true).title).toBe("🧱 Riverside is whole again");
+    expect(cityGrewNotice("Riverside", "Apartments", true)).toMatchObject({
+      title: "🧱 Riverside is whole again",
+      body: "Your crew restored the Apartments.",
+    });
   });
 
   it("stall: hard mode never promises the easy-mode save", () => {
@@ -34,41 +32,32 @@ describe("event notices keep their words", () => {
     expect(buildStalledNotice("Park", "easy").body).toContain("Nobody finished yesterday.");
   });
 
-  it("teammate completed carries the kudos button and who completed", () => {
+  it("first finisher: your turn, with the kudos button and who completed", () => {
     const n = teammateCompletedNotice("Riverside", "Tom");
-    expect(n.body).toBe("Tom completed today's goal. Your turn!");
+    expect(n.title).toBe("✅ Tom finished");
+    expect(n.body).toBe("Your turn in Riverside.");
     expect(n.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
     expect(n.data).toEqual({ completed_by: "Tom" });
-    expect(n.meta.variant).toBe("teammate_completed.v1");
+    expect(n.meta.variant).toBe("teammate_completed.first.v2");
   });
 
-  it("teammate completed with a photo says so and opens the proof", () => {
+  it("one person left: says it's on them", () => {
+    const n = teammateCompletedNotice("Riverside", "Tom", null, true);
+    expect(n.body).toBe("You're the last one in Riverside.");
+    expect(n.meta.variant).toBe("teammate_completed.last.v2");
+  });
+
+  it("with a photo the title says so and a tap opens the proof", () => {
     const n = teammateCompletedNotice("Riverside", "Tom", "2026-09-25");
     expect(n.title).toBe("📸 Tom posted proof");
-    expect(n.body).toBe("Tom finished today's goal in Riverside.");
+    expect(n.body).toBe("Your turn in Riverside.");
     // Still the kudos category: the recipients are still pending.
     expect(n.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
     expect(n.data).toEqual({ completed_by: "Tom", proof_date: "2026-09-25" });
-    expect(n.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.photo.v1" });
+    expect(n.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.first.photo.v2" });
   });
 
-  it("proof posted — to crewmates already done: no kudos button, budgeted", () => {
-    const n = proofPostedNotice("Riverside", "Tom", "2026-09-25");
-    expect(n.title).toBe("📸 Tom posted proof");
-    expect(n.body).toBe("Tom finished today's goal in Riverside. Tap to see the photo.");
-    expect(n.categoryId).toBeUndefined();
-    expect(n.data).toEqual({ completed_by: "Tom", proof_date: "2026-09-25" });
-    expect(n.meta).toMatchObject({ type: "proof_posted", category: "social", priority: "normal" });
-  });
-
-  it("next up / restoring / rescue / repair / kudos / nudge", () => {
-    expect(nextUpNotice("Riverside", "Amit", "Apartments", 3).body).toBe(
-      "Amit picked the Apartments for Riverside. It takes 3 days of everyone completing their goal.",
-    );
-    expect(restoringNotice("building", "Riverside", "Amit", "Cottage", 1).body).toContain("Today's goal restores it.");
-    expect(restoringNotice("park", "Riverside", "Amit", "Park", 3).title).toBe("🌳 Restoring a Park");
-    expect(buildRescuedNotice("Park", "Amit").title).toBe("🪖 The Park build is back on");
-    expect(streakRepairedNotice(9, "Amit", null).body).toBe("Amit used a hard hat to bring back your streak.");
+  it("kudos / nudge carry who sent them", () => {
     expect(kudosNotice("Amit").data).toEqual({ from: "Amit" });
     expect(peerNudgeNotice("Amit", "x").data).toEqual({ from: "Amit" });
   });
@@ -82,12 +71,8 @@ describe("labels", () => {
     buildStalledNotice("Park", "easy"),
     teammateCompletedNotice("R", "Tom"),
     teammateCompletedNotice("R", "Tom", "2026-09-25"),
-    proofPostedNotice("R", "Tom", "2026-09-25"),
-    nextUpNotice("R", "A", "Cottage", 1),
-    restoringNotice("building", "R", "A", "Cottage", 1),
-    restoringNotice("park", "R", "A", "Park", 2),
-    buildRescuedNotice("Park", "A"),
-    streakRepairedNotice(3, "A", "Park"),
+    teammateCompletedNotice("R", "Tom", null, true),
+    teammateCompletedNotice("R", "Tom", "2026-09-25", true),
     kudosNotice("A"),
     peerNudgeNotice("A", "x"),
     testNotice(),
