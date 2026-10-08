@@ -36,7 +36,8 @@ export interface InvitePreview {
 export function invitePreviewOf(
   groupId: string,
   data: FirebaseFirestore.DocumentData,
-  uid: string,
+  /** null when signed out. */
+  uid: string | null,
   viewerGroupIds: readonly string[],
 ): InvitePreview {
   const names: string[] = data.group_members ?? [];
@@ -44,7 +45,7 @@ export function invitePreviewOf(
   const founderIndex = data.owner_uid ? uids.indexOf(data.owner_uid) : -1;
   const founder = founderIndex >= 0 ? names[founderIndex] ?? null : null;
   const members = founder ? [founder, ...names.filter((_, i) => i !== founderIndex)] : [...names];
-  const isMember = uids.includes(uid);
+  const isMember = uid !== null && uids.includes(uid);
 
   return {
     group_id: groupId,

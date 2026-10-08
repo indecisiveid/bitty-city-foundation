@@ -50,4 +50,11 @@ describe("invitePreviewOf", () => {
     expect(invitePreviewOf("g1", full, "u-new", []).is_full).toBe(true);
     expect(invitePreviewOf("g1", full, "u-M3", []).is_full).toBe(false);
   });
+
+  it("previews for a signed-out viewer", () => {
+    const p = invitePreviewOf("g1", city(), null, []);
+    expect(p.founder).toBe("Riley");
+    expect(p.is_member).toBe(false);
+    expect(p.at_city_limit).toBe(false);
+  });
 });

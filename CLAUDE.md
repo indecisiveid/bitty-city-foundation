@@ -29,8 +29,8 @@ functions/src/
   preferenceHandlers.ts  Callables: markTipsSeen, setEmailUpdates
   invites.ts         PURE — what an invite link shows before joining (founder,
                      crew, goal, full / already-in / city-cap flags)
-  inviteHandlers.ts  Callable: previewInvite { group_code } — readable by any
-                     signed-in user who has the code (it already lets them join)
+  inviteHandlers.ts  Callable: previewInvite { group_code } — readable by anyone
+                     with the code, signed out too (it already lets them join)
   healthGoal.ts      PURE — Apple Health goals: metrics (steps|exercise_minutes|
                      workout|mindful_minutes), bounds, the 3 picker presets, and
                      effectiveHealthGoal (health_goal object wins, null = off,
