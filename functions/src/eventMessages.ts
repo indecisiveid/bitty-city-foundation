@@ -11,6 +11,7 @@
 import { PushPayload, NotificationCategory } from "./push";
 import { NoticeMeta } from "./notices";
 import { withArticle } from "./buildings";
+import { HealthReading } from "./proofs";
 
 export type Notice = PushPayload & { meta: NoticeMeta };
 
@@ -58,22 +59,66 @@ export function buildStalledNotice(label: string, mode: "easy" | "hard"): Notice
 }
 
 /**
+ * The headline for a shared Health reading — the numbers are the news.
+ * `teammate_completed.health.v1`.
+ */
+export function healthReadingTitle(name: string, health: HealthReading): string {
+  switch (health.metric) {
+    case "steps":
+      return `👟 ${name} hit ${health.value.toLocaleString("en-US")} steps`;
+    case "exercise_minutes":
+      return `⏱ ${name} got ${health.value} min of exercise`;
+    case "workout": {
+      const activityLabel = (health.workout?.activity ?? "workout").toLowerCase();
+      const km = health.workout?.km;
+      return km !== undefined
+        ? `🏃 ${name} logged a ${km} km ${activityLabel}`
+        : `🏃 ${name} logged a ${health.workout?.minutes ?? health.value}-min ${activityLabel}`;
+    }
+    case "mindful_minutes":
+      return `🧘 ${name} did ${health.value} mindful minutes`;
+  }
+}
+
+/**
  * "Tom completed today's goal. Your turn!" — to the members still pending.
  * Carries the Send kudos button: everyone on this list has NOT completed and
  * `completedName` has, exactly the precondition sendKudos enforces.
  *
  * With a photo (`proofDate` = the game day it belongs to) the push says so and
  * carries `proof_date`, so a tap opens that day's proof instead of just the
- * city — the photo is the news, not the checkmark.
+ * city — the photo is the news, not the checkmark. A Health reading the
+ * member chose to share (`health`) does the same with the numbers; one kept
+ * private never reaches this function, so it reads as a plain completion.
  */
-export function teammateCompletedNotice(cityName: string, completedName: string, proofDate?: string | null): Notice {
+export function teammateCompletedNotice(
+  cityName: string,
+  completedName: string,
+  proofDate?: string | null,
+  health?: HealthReading | null,
+): Notice {
+  const kind = health ? "health" : proofDate ? "photo" : "plain";
   const meta: NoticeMeta = {
     type: "teammate_completed",
     category: "social",
     priority: "transactional",
-    variant: proofDate ? "teammate_completed.photo.v1" : "teammate_completed.v1",
+    variant:
+      kind === "health" ? "teammate_completed.health.v1"
+      : kind === "photo" ? "teammate_completed.photo.v1"
+      : "teammate_completed.v1",
   };
-  return proofDate
+  if (kind === "health") {
+    return {
+      title: healthReadingTitle(completedName, health!),
+      body: `${completedName} finished today's goal in ${cityName}.`,
+      categoryId: NotificationCategory.TEAMMATE_COMPLETED,
+      data: proofDate
+        ? { completed_by: completedName, proof_date: proofDate }
+        : { completed_by: completedName },
+      meta,
+    };
+  }
+  return kind === "photo"
     ? {
         title: `📸 ${completedName} posted proof`,
         body: `${completedName} finished today's goal in ${cityName}.`,

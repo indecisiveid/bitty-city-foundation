@@ -52,6 +52,38 @@ describe("event notices keep their words", () => {
     expect(n.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.photo.v1" });
   });
 
+  it("teammate completed with a shared Health reading leads with the numbers", () => {
+    const base = { target: 1, sources: ["Apple Watch"] };
+    const steps = teammateCompletedNotice("Riverside", "Tom", "2026-10-07", { ...base, metric: "steps", value: 12345 });
+    expect(steps.title).toBe("👟 Tom hit 12,345 steps");
+    expect(steps.body).toBe("Tom finished today's goal in Riverside.");
+    expect(steps.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
+    expect(steps.data).toEqual({ completed_by: "Tom", proof_date: "2026-10-07" });
+    expect(steps.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.health.v1" });
+
+    expect(teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "exercise_minutes", value: 42 }).title).toBe(
+      "⏱ Tom got 42 min of exercise",
+    );
+    expect(teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "mindful_minutes", value: 12 }).title).toBe(
+      "🧘 Tom did 12 mindful minutes",
+    );
+    expect(
+      teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 45, workout: { activity: "Running", minutes: 45, km: 8.2 } }).title,
+    ).toBe("🏃 Tom logged a 8.2 km running");
+    expect(
+      teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 40, workout: { activity: "Yoga", minutes: 40 } }).title,
+    ).toBe("🏃 Tom logged a 40-min yoga");
+    expect(teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 30 }).title).toBe(
+      "🏃 Tom logged a 30-min workout",
+    );
+  });
+
+  it("no Health reading → the plain or photo push, unchanged", () => {
+    expect(teammateCompletedNotice("Riverside", "Tom", null, null).meta.variant).toBe("teammate_completed.v1");
+    expect(teammateCompletedNotice("Riverside", "Tom", null, null).data).toEqual({ completed_by: "Tom" });
+    expect(teammateCompletedNotice("Riverside", "Tom", "2026-09-25", null).meta.variant).toBe("teammate_completed.photo.v1");
+  });
+
   it("proof posted — to crewmates already done: no kudos button, budgeted", () => {
     const n = proofPostedNotice("Riverside", "Tom", "2026-09-25");
     expect(n.title).toBe("📸 Tom posted proof");
@@ -82,6 +114,7 @@ describe("labels", () => {
     buildStalledNotice("Park", "easy"),
     teammateCompletedNotice("R", "Tom"),
     teammateCompletedNotice("R", "Tom", "2026-09-25"),
+    teammateCompletedNotice("R", "Tom", "2026-09-25", { metric: "steps", value: 10000, target: 10000, sources: [] }),
     proofPostedNotice("R", "Tom", "2026-09-25"),
     nextUpNotice("R", "A", "Cottage", 1),
     restoringNotice("building", "R", "A", "Cottage", 1),

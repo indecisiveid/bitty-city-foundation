@@ -31,8 +31,15 @@ functions/src/
                      crew, goal, full / already-in / city-cap flags)
   inviteHandlers.ts  Callable: previewInvite { group_code } — readable by any
                      signed-in user who has the code (it already lets them join)
+  healthGoal.ts      PURE — Apple Health goals: metrics (steps|exercise_minutes|
+                     workout|mindful_minutes), bounds, the 3 picker presets, and
+                     effectiveHealthGoal (health_goal object wins, null = off,
+                     absent = derived from goal text). MIRRORED in the app's
+                     mobile/src/health/healthGoal.ts — change both together
+  healthHandlers.ts  Callable: stopHealthSharing — strips the caller's shared
+                     Health numbers from proofs_today + every days/* doc
   cityHandlers.ts    Callable: updateCitySettings (any member) — name, goal text,
-                     goal category. NOT reset time/timezone (moving the day
+                     goal category, health_goal (object | null = off). NOT reset time/timezone (moving the day
                      boundary mid-game needs its own design)
   groupHandlers.ts   Callables: createGroup, joinGroup, getGroup,
                      completeGoal, selectBuild, deleteGroup, leaveGroup,
@@ -42,7 +49,9 @@ functions/src/
                      ResetCity) — deployed but email-allowlisted
   auth.ts            requireAuth / requireDemoAccess (+ DEMO_ALLOWLIST param)
   proofs.ts          PURE goal-proof logic — key shape (proofs/{g}/{uid}/{id}.jpg),
-                     date-stamped proofs_today bucket (mirrors kudos.ts)
+                     date-stamped proofs_today bucket (mirrors kudos.ts), Health
+                     readings (resolveHealthProof: judged against the CITY's goal,
+                     server sets target, numbers stored only when share === true)
   proofStorage.ts    Admin-SDK check that a claimed proof object really exists
                      (bucket from PROOFS_BUCKET param)
   notices.ts         PURE — the one policy every push passes: category budgets
@@ -82,7 +91,8 @@ scripts/email-audience.mjs   read-only: opted-in emails → CSV for the mailing 
 `groups/{id}`: `group_code, group_name, group_members: string[]` (display
 names, ≤4), `owner_uid`, `member_uids: string[]` (index-aligned with
 group_members), `daily_goal` (free text), `goal_category` (absent = custom; see
-`goals.ts`), `goal_reset_time "HH:MM"`,
+`goals.ts`), `health_goal: {metric, target, activity?} | null` (absent = derived
+from a preset goal text; null = Health off; see `healthGoal.ts`), `goal_reset_time "HH:MM"`,
 `goal_reset_timezone` (IANA), `completions_today: string[]` (names),
 `streak`, `streak_freezes` (start 1, cap 3, +1 per landing),
 `frozen_dates: string[]`, `broken_streak: {value, broken_on,
@@ -91,7 +101,7 @@ last_active_date} | null`, `last_activity_date`,
 JSON, never nested arrays** — Firestore rejects them),
 `last_processed_date`, `pending_event` (has `cause: missed_day|inactivity`
 on asteroids), `building_completions: string[]` (every successful day),
-`proofs_today: {date, entries: {[name]: {status: photo|skipped, key?}}} | null`
+`proofs_today: {date, entries: {[name]: {status: photo|health|skipped, key?, health?, auto?}}} | null`
 (today's goal proofs, cleared at rollover), `game_mode: "easy"|"hard"` (absent = hard), `near_miss_dates: string[]`
 (hard mode: settlement labels where someone-but-not-everyone finished),
 `mode_suggestion: {suggested_on, near_misses, dismissed_by[]} | null`,
@@ -105,7 +115,7 @@ a quest carry `current_build.quest` (survives stall/rescue/repair).
 `config/quests` (server-only) overrides `DEFAULT_QUEST_CONFIG`, incl.
 `enabled` — **false until the app with the quest card ships**.
 
-`groups/{id}/days/{YYYY-MM-DD}` → `{proofs: {[name]: {status, key?, at}}}` —
+`groups/{id}/days/{YYYY-MM-DD}` → `{proofs: {[name]: {status, key?, health?, auto?, at}}}` —
 durable proof ledger, written by `completeGoal`, member-readable (the app's
 "See proof" reads it directly + resolves photo URLs with the Storage SDK).
 Photos live in Storage at `proofs/{groupId}/{uid}/{random}.jpg` behind
@@ -209,7 +219,7 @@ cd functions && npm test          # jest (gameLogic suite)
 # pubsub is required now too — the scheduled day-rollover function is a
 # Pub/Sub trigger and is silently ignored by the emulator without it.
 firebase emulators:start --only auth,functions,firestore,storage,pubsub --project bitty-city --non-interactive
-node scripts/emulator-smoke.mjs   # 249-check end-to-end smoke (pubsub: scheduler, reminders, quests; store packs)
+node scripts/emulator-smoke.mjs   # 285-check end-to-end smoke (pubsub: scheduler, reminders, quests; store packs)
 # Ports busy (another session's emulator)? Start yours from a copy of
 # firebase.json with other ports and run the smoke with
 # SMOKE_{AUTH,FUNCTIONS,FIRESTORE,STORAGE}_PORT=… set.

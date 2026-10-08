@@ -42,7 +42,16 @@ import { joinedMessage, leftMessage } from "./crewMessages";
 import { activeMembersOn, isDayPaused, pausedMembersOn, rosterOf, MemberPauses } from "./pauses";
 import { buildProgressOf } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor, minBuildingsFor } from "./buildCatalog";
-import { isProofKeyFor, applyProof, photoCount, ProofEntry, MAX_PROOF_BYTES } from "./proofs";
+import {
+  isProofKeyFor,
+  applyProof,
+  sharedProofCount,
+  ProofEntry,
+  MAX_PROOF_BYTES,
+  HealthProofArg,
+  isHealthProofArg,
+  resolveHealthProof,
+} from "./proofs";
 import {
   GameMode,
   LEGACY_GAME_MODE,
@@ -133,13 +142,23 @@ export function memberNameForUid(
 }
 
 /**
- * `completeGoal` proof argument. Absent (old binaries) or `{skipped:true}`
- * → "skipped". `{key}` → must be under this caller's own slot in this group,
- * and the object must already be in the bucket and within the size cap.
+ * A proof as far as it can be judged before the transaction: photos and skips
+ * are final; a Health check-in still has to be judged against the city as it
+ * stands inside the transaction (a crewmate may be changing the goal).
  */
-async function resolveProof(raw: unknown, groupId: string, uid: string): Promise<ProofEntry> {
+type PendingProof = { kind: "ready"; entry: ProofEntry } | { kind: "health"; arg: HealthProofArg };
+
+/**
+ * `completeGoal` proof argument. Absent (old binaries) or `{skipped:true}`
+ * → "skipped". `{health, share, auto?}` → a Health check-in, judged in the
+ * transaction by `healthEntryFor`. `{key}` → must be under this caller's own
+ * slot in this group, and the object must already be in the bucket and
+ * within the size cap.
+ */
+async function resolveProof(raw: unknown, groupId: string, uid: string): Promise<PendingProof> {
   const proof = raw as { key?: unknown; skipped?: unknown } | undefined;
-  if (!proof || proof.skipped === true) return { status: "skipped" };
+  if (!proof || proof.skipped === true) return { kind: "ready", entry: { status: "skipped" } };
+  if (isHealthProofArg(proof)) return { kind: "health", arg: proof };
   if (!isProofKeyFor(proof.key, groupId, uid)) {
     throw new HttpsError("invalid-argument", "proof.key is not one of your uploads for this group");
   }
@@ -152,7 +171,14 @@ async function resolveProof(raw: unknown, groupId: string, uid: string): Promise
     await deleteProofObject(proof.key, bucket);
     throw new HttpsError("failed-precondition", "Photo is too large — try again or skip");
   }
-  return { status: "photo", key: proof.key };
+  return { kind: "ready", entry: { status: "photo", key: proof.key } };
+}
+
+/** A Health check-in against the city's effective goal (see proofs.ts). */
+function healthEntryFor(arg: HealthProofArg, group: FirebaseFirestore.DocumentData): ProofEntry {
+  const result = resolveHealthProof(arg, group);
+  if (!result.ok) throw new HttpsError(result.code, result.message);
+  return result.entry;
 }
 
 function createdAtIso(data: FirebaseFirestore.DocumentData): string | null {
@@ -771,8 +797,10 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   }
 
   // Verify the proof OUTSIDE the transaction — it's a network round-trip to
-  // Storage and Firestore transactions may retry.
-  const proofEntry = await resolveProof(proof, group_id, uid);
+  // Storage and Firestore transactions may retry. A Health check-in is judged
+  // inside, against the fresh city doc.
+  const pendingProof = await resolveProof(proof, group_id, uid);
+  let proofEntry: ProofEntry = pendingProof.kind === "ready" ? pendingProof.entry : { status: "health" };
 
   // Set only when THIS call is the one that records a new completion (not the
   // idempotent re-tap), so we notify teammates exactly once.
@@ -787,6 +815,8 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     const freshData = freshSnap.data()!;
     const member = memberNameForUid(freshData, uid);
     const completions: string[] = freshData.completions_today;
+    // Like a bad photo key, a refused Health reading errors even on a re-tap.
+    if (pendingProof.kind === "health") proofEntry = healthEntryFor(pendingProof.arg, freshData);
 
     // The current game-day label in the group's timezone — completing the
     // goal is "activity" for the 7-day inactivity meteor.
@@ -936,18 +966,22 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     // stamped inside the transaction, so a call straddling the reset still
     // points at the right day.
     const filedOn: string = finalData!.proofs_today?.date ?? today;
-    const proofDate = proofEntry.status === "photo" ? filedOn : null;
+    // A shared Health reading is news too (the numbers); a private one is a
+    // plain checkmark — no numbers, no proof_date.
+    const sharedHealth = proofEntry.status === "health" ? proofEntry.health ?? null : null;
+    const isPhoto = proofEntry.status === "photo";
+    const proofDate = isPhoto || sharedHealth ? filedOn : null;
     if (stillPending.length > 0) {
       await notifyMembers(
         group_id,
         finalData!,
         stillPending,
-        teammateCompletedNotice(cityName, completedName, proofDate),
+        teammateCompletedNotice(cityName, completedName, proofDate, sharedHealth),
       );
       // Crewmates who already finished don't get "your turn" — but they do
-      // want to see the photo.
+      // want to see the photo. (Photo only: proofPostedNotice says "photo".)
       const alreadyDone = done.filter((m) => m !== completedName);
-      if (proofDate && alreadyDone.length > 0) {
+      if (isPhoto && proofDate && alreadyDone.length > 0) {
         await notifyMembers(group_id, finalData!, alreadyDone, proofPostedNotice(cityName, completedName, proofDate));
       }
     } else {
@@ -955,7 +989,8 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       // point at what's next. If this completion landed the build, the copy
       // already says so (dayCompleteMessage reads the build before it was
       // cleared? — no: it reads `finalData`, so pass the pre-landing build).
-      // If anyone posted a photo today, a tap opens the whole day's proof.
+      // If anyone posted a photo or shared a Health reading today, a tap
+      // opens the whole day's proof.
       const dayNotice = notice(dayCompleteMessage(landedBuild ? { ...finalData!, current_build: landedBuild } : finalData!), {
         type: "day_complete",
         category: "crew",
@@ -965,7 +1000,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       await notifyAllMembers(
         group_id,
         finalData!,
-        photoCount(finalData!.proofs_today, filedOn) > 0 ? { ...dayNotice, data: { proof_date: filedOn } } : dayNotice,
+        sharedProofCount(finalData!.proofs_today, filedOn) > 0 ? { ...dayNotice, data: { proof_date: filedOn } } : dayNotice,
       );
     }
   }
