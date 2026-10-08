@@ -11,6 +11,7 @@
 import { PushPayload, NotificationCategory } from "./push";
 import { NoticeMeta } from "./notices";
 import { withArticle } from "./buildings";
+import { ProofStatus } from "./proofs";
 
 export type Notice = PushPayload & { meta: NoticeMeta };
 
@@ -58,27 +59,38 @@ export function buildStalledNotice(label: string, mode: "easy" | "hard"): Notice
 }
 
 /**
+ * How a finish was proven, as the push says it: "Tom finished with a photo".
+ * A new proof source (Apple Health, Strava, …) is one line here — the push
+ * reads "Tom finished with Strava" without touching the copy below.
+ */
+export const PROOF_SOURCES: Partial<Record<ProofStatus, { emoji: string; via: string }>> = {
+  photo: { emoji: "📸", via: "a photo" },
+};
+
+/**
  * A teammate finished. Sent to the members still pending, and only for the
  * first finisher of the day or when one person is left (`last`) — see
- * completeGoal. With a photo the title says so and a tap opens it.
+ * completeGoal. With proof the title says how, and a tap opens that day's
+ * proof (`proof_date`).
  */
 export function teammateCompletedNotice(
   cityName: string,
   completedName: string,
-  proofDate?: string | null,
+  proof?: { status: ProofStatus; date: string } | null,
   last = false,
 ): Notice {
+  const source = proof ? PROOF_SOURCES[proof.status] : undefined;
   const meta: NoticeMeta = {
     type: "teammate_completed",
     category: "social",
     priority: "transactional",
-    variant: `teammate_completed.${last ? "last" : "first"}${proofDate ? ".photo" : ""}.v2`,
+    variant: `teammate_completed.${last ? "last" : "first"}${source ? `.${proof!.status}` : ""}.v2`,
   };
   return {
-    title: proofDate ? `📸 ${completedName} posted proof` : `✅ ${completedName} finished`,
+    title: source ? `${source.emoji} ${completedName} finished with ${source.via}` : `✅ ${completedName} finished`,
     body: last ? `You're the last one in ${cityName}.` : `Your turn in ${cityName}.`,
     categoryId: NotificationCategory.TEAMMATE_COMPLETED,
-    data: { completed_by: completedName, ...(proofDate ? { proof_date: proofDate } : {}) },
+    data: { completed_by: completedName, ...(source ? { proof_date: proof!.date } : {}) },
     meta,
   };
 }

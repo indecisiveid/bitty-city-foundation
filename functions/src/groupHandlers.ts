@@ -924,12 +924,12 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
       (m: string) => !done.includes(m),
     );
     const cityName = finalData!.group_name ?? "Bitty City";
-    // A photo is the news: the push says so and a tap opens it. The date is
+    // The proof is the news: the push says how and a tap opens it. The date is
     // the game day the proof was filed under (the day ledger's doc id) —
     // stamped inside the transaction, so a call straddling the reset still
     // points at the right day.
     const filedOn: string = finalData!.proofs_today?.date ?? today;
-    const proofDate = proofEntry.status === "photo" ? filedOn : null;
+    const proof = { status: proofEntry.status, date: filedOn };
     if (stillPending.length > 0) {
       // "Your turn" goes out twice a day at most: when the FIRST teammate
       // finishes (the day is moving) and when only ONE person is left (it's
@@ -943,7 +943,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
           group_id,
           finalData!,
           stillPending,
-          teammateCompletedNotice(cityName, completedName, proofDate, last),
+          teammateCompletedNotice(cityName, completedName, proof, last),
         );
       }
     } else {

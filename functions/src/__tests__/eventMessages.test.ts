@@ -47,14 +47,21 @@ describe("event notices keep their words", () => {
     expect(n.meta.variant).toBe("teammate_completed.last.v2");
   });
 
-  it("with a photo the title says so and a tap opens the proof", () => {
-    const n = teammateCompletedNotice("Riverside", "Tom", "2026-09-25");
-    expect(n.title).toBe("📸 Tom posted proof");
+  it("with a photo the title says how they finished and a tap opens the proof", () => {
+    const n = teammateCompletedNotice("Riverside", "Tom", { status: "photo", date: "2026-09-25" });
+    expect(n.title).toBe("📸 Tom finished with a photo");
     expect(n.body).toBe("Your turn in Riverside.");
     // Still the kudos category: the recipients are still pending.
     expect(n.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
     expect(n.data).toEqual({ completed_by: "Tom", proof_date: "2026-09-25" });
     expect(n.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.first.photo.v2" });
+  });
+
+  it("a skipped proof reads as a plain finish", () => {
+    const n = teammateCompletedNotice("Riverside", "Tom", { status: "skipped", date: "2026-09-25" });
+    expect(n.title).toBe("✅ Tom finished");
+    expect(n.data).toEqual({ completed_by: "Tom" });
+    expect(n.meta.variant).toBe("teammate_completed.first.v2");
   });
 
   it("kudos / nudge carry who sent them", () => {
@@ -70,9 +77,9 @@ describe("labels", () => {
     buildStalledNotice("Park", "hard"),
     buildStalledNotice("Park", "easy"),
     teammateCompletedNotice("R", "Tom"),
-    teammateCompletedNotice("R", "Tom", "2026-09-25"),
+    teammateCompletedNotice("R", "Tom", { status: "photo", date: "2026-09-25" }),
     teammateCompletedNotice("R", "Tom", null, true),
-    teammateCompletedNotice("R", "Tom", "2026-09-25", true),
+    teammateCompletedNotice("R", "Tom", { status: "photo", date: "2026-09-25" }, true),
     kudosNotice("A"),
     peerNudgeNotice("A", "x"),
     testNotice(),
