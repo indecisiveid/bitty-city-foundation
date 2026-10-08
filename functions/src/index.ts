@@ -46,6 +46,10 @@ export { redeemPurchase, placeHardHats } from "./storeHandlers";
 
 export { updateCitySettings } from "./cityHandlers";
 
+export { stopHealthSharing } from "./healthHandlers";
+
 export { markTipsSeen, setEmailUpdates } from "./preferenceHandlers";
 
 export { dailyNudge } from "./scheduled";
+
+export { previewInvite } from "./inviteHandlers";

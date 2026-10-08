@@ -2,7 +2,8 @@
  * Goal-completion proof — pure logic.
  *
  * A proof is what a member attached when they marked today's goal done: a
- * photo (an object in the Storage bucket) or an explicit skip. State lives on
+ * photo (an object in the Storage bucket), a Health reading (Apple Health
+ * counted the goal — see healthGoal.ts), or an explicit skip. State lives on
  * the group doc as a single-day bucket, exactly like `kudos.ts`:
  *
  *   proofs_today: { date: "YYYY-MM-DD", entries: { [memberName]: ProofEntry } }
@@ -15,12 +16,37 @@
  * shape and owner here so a caller can't attach someone else's photo.
  */
 
-export type ProofStatus = "photo" | "skipped";
+import {
+  HealthGoal,
+  HealthMetric,
+  METRIC_BOUNDS,
+  effectiveHealthGoal,
+  isActivity,
+  isHealthMetric,
+  isIntIn,
+} from "./healthGoal";
+
+export type ProofStatus = "photo" | "health" | "skipped";
+
+export interface HealthReading {
+  metric: HealthMetric;
+  /** Integer; for "workout" it is minutes. */
+  value: number;
+  /** The CITY's target — set by the server, never taken from the client. */
+  target: number;
+  /** 0..3 names of where the data came from, e.g. ["Apple Watch"], ["Strava"]. */
+  sources: string[];
+  workout?: { activity: string; minutes: number; km?: number };
+}
 
 export interface ProofEntry {
   status: ProofStatus;
   /** Storage object key — present iff status === "photo". */
   key?: string;
+  /** Only for status "health" when the member shares numbers with the crew. */
+  health?: HealthReading;
+  /** A health check-in the app made automatically. */
+  auto?: true;
 }
 
 export interface ProofsState {
@@ -43,11 +69,61 @@ export function isProofKeyFor(key: unknown, groupId: string, uid: string): key i
   return FILE_RE.test(key.slice(prefix.length));
 }
 
+export const MAX_HEALTH_SOURCES = 3;
+export const MAX_SOURCE_LENGTH = 40;
+export const MAX_WORKOUT_MINUTES = 1440;
+export const MAX_WORKOUT_KM = 500;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === "object" && !Array.isArray(v);
+
+const isSources = (v: unknown): v is string[] =>
+  Array.isArray(v) &&
+  v.length <= MAX_HEALTH_SOURCES &&
+  v.every((s) => typeof s === "string" && s.length >= 1 && s.length <= MAX_SOURCE_LENGTH);
+
+/** 0..500 km, at most two decimals. */
+const isKm = (v: unknown): v is number =>
+  typeof v === "number" &&
+  Number.isFinite(v) &&
+  v >= 0 &&
+  v <= MAX_WORKOUT_KM &&
+  Math.round(v * 100) / 100 === v;
+
+const isWorkout = (v: unknown): v is NonNullable<HealthReading["workout"]> =>
+  isPlainObject(v) &&
+  isActivity(v.activity) &&
+  isIntIn(v.minutes, 1, MAX_WORKOUT_MINUTES) &&
+  (v.km === undefined || isKm(v.km));
+
+/**
+ * The reading's shape, ignoring the city: known metric, integer value within
+ * the metric's bounds, sane sources and workout. `target` must be a valid
+ * target for the metric (on a stored entry it is the city's).
+ */
+export function isHealthReading(v: unknown): v is HealthReading {
+  if (!isPlainObject(v)) return false;
+  if (!isHealthMetric(v.metric)) return false;
+  const max = METRIC_BOUNDS[v.metric];
+  if (!isIntIn(v.value, 0, max)) return false;
+  if (!isIntIn(v.target, 1, max)) return false;
+  if (!isSources(v.sources)) return false;
+  if (v.workout !== undefined && !isWorkout(v.workout)) return false;
+  return true;
+}
+
 const isEntry = (v: unknown): v is ProofEntry => {
   if (!v || typeof v !== "object") return false;
   const e = v as ProofEntry;
   if (e.status === "skipped") return e.key === undefined;
   if (e.status === "photo") return typeof e.key === "string" && e.key.startsWith(PROOFS_PREFIX);
+  if (e.status === "health") {
+    return (
+      e.key === undefined &&
+      (e.health === undefined || isHealthReading(e.health)) &&
+      (e.auto === undefined || e.auto === true)
+    );
+  }
   return false;
 };
 
@@ -85,4 +161,88 @@ export function applyProof(
 /** How many of `today`'s proofs are photos (skips don't count). */
 export function photoCount(raw: unknown, today: string): number {
   return Object.values(normalizeProofs(raw, today).entries).filter((e) => e.status === "photo").length;
+}
+
+/**
+ * How many of `today`'s proofs the crew can actually look at: photos, plus
+ * Health check-ins that shared their numbers. A Health check-in kept private
+ * is just a checkmark.
+ */
+export function sharedProofCount(raw: unknown, today: string): number {
+  return Object.values(normalizeProofs(raw, today).entries).filter(
+    (e) => e.status === "photo" || (e.status === "health" && e.health !== undefined),
+  ).length;
+}
+
+// --- Health check-ins -------------------------------------------------------
+
+/**
+ * `completeGoal`'s `proof` for a Health check-in:
+ *   { health: { metric, value, target, sources, workout? }, share: boolean, auto?: boolean }
+ */
+export interface HealthProofArg {
+  health: unknown;
+  share?: unknown;
+  auto?: unknown;
+}
+
+export function isHealthProofArg(raw: unknown): raw is HealthProofArg {
+  return isPlainObject(raw) && raw.health !== undefined;
+}
+
+export type HealthProofResult =
+  | { ok: true; entry: ProofEntry; goal: HealthGoal }
+  | { ok: false; code: "failed-precondition" | "invalid-argument"; message: string };
+
+export const NOT_A_HEALTH_CITY = "This city's goal isn't counted with Apple Health";
+export const NOT_THERE_YET = "Not there yet — keep going, or check in with a photo";
+
+/**
+ * Judge a Health check-in against the city. PURE — the caller turns a
+ * refusal into an HttpsError. The client's `target` is ignored: the city's
+ * effective goal sets the bar and is what gets stored. Numbers are stored
+ * only when `share === true` (anything else keeps them private), and `auto`
+ * only when it is exactly `true`.
+ */
+export function resolveHealthProof(
+  raw: HealthProofArg,
+  group: { health_goal?: unknown; daily_goal?: unknown },
+): HealthProofResult {
+  const goal = effectiveHealthGoal(group);
+  if (!goal) return { ok: false, code: "failed-precondition", message: NOT_A_HEALTH_CITY };
+
+  const h = raw.health;
+  if (!isPlainObject(h)) return { ok: false, code: "invalid-argument", message: "proof.health must be an object" };
+  if (h.metric !== goal.metric) {
+    return { ok: false, code: "invalid-argument", message: "proof.health.metric doesn't match this city's goal" };
+  }
+  if (!isIntIn(h.value, 0, METRIC_BOUNDS[goal.metric])) {
+    return { ok: false, code: "invalid-argument", message: "proof.health.value is out of range" };
+  }
+  if (!isSources(h.sources)) {
+    return { ok: false, code: "invalid-argument", message: "proof.health.sources is malformed" };
+  }
+  if (h.workout !== undefined && !isWorkout(h.workout)) {
+    return { ok: false, code: "invalid-argument", message: "proof.health.workout is malformed" };
+  }
+  if (h.value < goal.target) return { ok: false, code: "failed-precondition", message: NOT_THERE_YET };
+
+  const entry: ProofEntry = { status: "health" };
+  if (raw.share === true) {
+    const reading: HealthReading = {
+      metric: goal.metric,
+      value: h.value,
+      target: goal.target,
+      sources: [...(h.sources as string[])],
+    };
+    if (h.workout !== undefined) {
+      const w = h.workout as NonNullable<HealthReading["workout"]>;
+      reading.workout = w.km !== undefined
+        ? { activity: w.activity, minutes: w.minutes, km: w.km }
+        : { activity: w.activity, minutes: w.minutes };
+    }
+    entry.health = reading;
+  }
+  if (raw.auto === true) entry.auto = true;
+  return { ok: true, entry, goal };
 }

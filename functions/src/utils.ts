@@ -86,6 +86,9 @@ export function groupToResponse(
     member_uids: data.member_uids ?? [],
     daily_goal: data.daily_goal,
     goal_category: normalizeGoalCategory(data.goal_category),
+    // healthGoal.ts: present (an object, or null = Health turned off) only
+    // when a member set it; absent → the app derives it from the goal text.
+    ...(data.health_goal !== undefined ? { health_goal: data.health_goal } : {}),
     goal_reset_time: data.goal_reset_time,
     goal_reset_timezone: data.goal_reset_timezone ?? "UTC",
     completions_today: data.completions_today,

@@ -439,6 +439,127 @@ async function main() {
   check("member removed from today's proof bucket", !('Quinn' in qToday) && 'Christian' in qToday, JSON.stringify(Object.keys(qToday)));
   await call('deleteGroup', { group_id: qc.group_id }, dev);
 
+  console.log('— health proofs —');
+  {
+    const H_city = (await call(
+      'createGroup',
+      { group_name: 'Step City', member: 'Christian', daily_goal: 'Walk 10,000 steps', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+      dev,
+    )).result;
+    await call('joinGroup', { group_code: H_city.group_code, member: 'Bob' }, bob);
+    await call('joinGroup', { group_code: H_city.group_code, member: 'Eve' }, eve);
+    check('health: a preset city carries no explicit health_goal', H_city && !('health_goal' in H_city), JSON.stringify(H_city?.health_goal));
+    const H_reading = (value, extra = {}) => ({ metric: 'steps', value, target: 1, sources: ['Apple Watch'], ...extra });
+
+    const H_low = await call('completeGoal', { group_id: H_city.group_id, proof: { health: H_reading(9999, { target: 5000 }), share: true } }, dev);
+    check('health: below the city target is refused (client target ignored)', H_low.error === 'FAILED_PRECONDITION' && /Not there yet/.test(H_low.message ?? ''), JSON.stringify(H_low));
+    const H_metric = await call('completeGoal', { group_id: H_city.group_id, proof: { health: { ...H_reading(20), metric: 'mindful_minutes' }, share: true } }, dev);
+    check('health: a metric that is not the city\'s is refused', H_metric.error === 'INVALID_ARGUMENT', JSON.stringify(H_metric));
+    const H_bad = await call('completeGoal', { group_id: H_city.group_id, proof: { health: H_reading(12000.5), share: true } }, dev);
+    check('health: a non-integer value is refused', H_bad.error === 'INVALID_ARGUMENT', JSON.stringify(H_bad));
+    const H_badSrc = await call('completeGoal', { group_id: H_city.group_id, proof: { health: H_reading(12000, { sources: ['a', 'b', 'c', 'd'] }), share: true } }, dev);
+    check('health: too many sources refused', H_badSrc.error === 'INVALID_ARGUMENT', JSON.stringify(H_badSrc));
+    const H_notYet = (await readDoc(`groups/${H_city.group_id}`, ADMIN)).body?.fields?.completions_today?.arrayValue?.values ?? [];
+    check('health: refused check-ins record nothing', H_notYet.length === 0, JSON.stringify(H_notYet));
+
+    const H_shared = await call('completeGoal', { group_id: H_city.group_id, proof: { health: H_reading(12345), share: true, auto: true } }, dev);
+    const H_devEntry = H_shared.result?.proofs_today?.entries?.Christian;
+    check('health: shared check-in completes the goal', H_shared.result?.completions_today?.includes('Christian'), JSON.stringify(H_shared).slice(0, 200));
+    check(
+      'health: shared entry stores the numbers with the CITY target + auto',
+      H_devEntry?.status === 'health' && H_devEntry?.health?.value === 12345 && H_devEntry?.health?.target === 10000 &&
+        H_devEntry?.health?.metric === 'steps' && JSON.stringify(H_devEntry?.health?.sources) === '["Apple Watch"]' && H_devEntry?.auto === true,
+      JSON.stringify(H_devEntry),
+    );
+    const H_day = H_shared.result?.proofs_today?.date;
+    const H_ledger = () => readDoc(`groups/${H_city.group_id}/days/${H_day}`, ADMIN).then((r) => r.body?.fields?.proofs?.mapValue?.fields ?? {});
+    const H_l1 = (await H_ledger()).Christian?.mapValue?.fields ?? {};
+    check(
+      'health: day ledger has the reading + at',
+      H_l1.status?.stringValue === 'health' && H_l1.health?.mapValue?.fields?.target?.integerValue === '10000' && typeof H_l1.at?.stringValue === 'string',
+      JSON.stringify(H_l1),
+    );
+
+    const H_private = await call('completeGoal', { group_id: H_city.group_id, proof: { health: H_reading(15000), share: false } }, bob);
+    const H_bobEntry = H_private.result?.proofs_today?.entries?.Bob;
+    check('health: not-shared entry stores no numbers', JSON.stringify(H_bobEntry) === '{"status":"health"}', JSON.stringify(H_bobEntry));
+    const H_l2 = (await H_ledger()).Bob?.mapValue?.fields ?? {};
+    check('health: not-shared ledger entry has no numbers', H_l2.status?.stringValue === 'health' && !('health' in H_l2) && !('auto' in H_l2), JSON.stringify(H_l2));
+    const H_retap = await call('completeGoal', { group_id: H_city.group_id, proof: { health: H_reading(20000), share: true } }, bob);
+    check('health: re-tap is idempotent (first proof wins)', JSON.stringify(H_retap.result?.proofs_today?.entries?.Bob) === '{"status":"health"}', JSON.stringify(H_retap).slice(0, 200));
+
+    console.log('— health goal settings —');
+    const H_read = (await call(
+      'createGroup',
+      { group_name: 'Book Club', member: 'Christian', daily_goal: 'Read 10 pages', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+      dev,
+    )).result;
+    const H_noGoal = await call('completeGoal', { group_id: H_read.group_id, proof: { health: { metric: 'steps', value: 12000, target: 10000, sources: [] }, share: true } }, dev);
+    check('health: a city with no Health goal refuses a Health check-in', H_noGoal.error === 'FAILED_PRECONDITION' && /Apple Health/.test(H_noGoal.message ?? ''), JSON.stringify(H_noGoal));
+    const H_setBad = await call('updateCitySettings', { group_id: H_read.group_id, health_goal: { metric: 'steps', target: 0 } }, dev);
+    check('health: an invalid health_goal is refused', H_setBad.error === 'INVALID_ARGUMENT', JSON.stringify(H_setBad));
+    const H_setOk = await call('updateCitySettings', { group_id: H_read.group_id, health_goal: { metric: 'mindful_minutes', target: 5, junk: 1 } }, dev);
+    check('health: updateCitySettings sets health_goal (known fields only)', JSON.stringify(H_setOk.result?.health_goal) === '{"metric":"mindful_minutes","target":5}', JSON.stringify(H_setOk).slice(0, 200));
+    const H_mindful = await call('completeGoal', { group_id: H_read.group_id, proof: { health: { metric: 'mindful_minutes', value: 6, target: 99, sources: [] }, share: true } }, dev);
+    check('health: an explicit health_goal is the bar', H_mindful.result?.proofs_today?.entries?.Christian?.health?.target === 5, JSON.stringify(H_mindful).slice(0, 200));
+    await call('deleteGroup', { group_id: H_read.group_id }, dev);
+
+    const H_med = (await call(
+      'createGroup',
+      { group_name: 'Calm Town', member: 'Christian', daily_goal: 'Meditate for 10 min', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+      dev,
+    )).result;
+    const H_off = await call('updateCitySettings', { group_id: H_med.group_id, health_goal: null }, dev);
+    check('health: health_goal null is stored and returned', H_off.result && H_off.result.health_goal === null, JSON.stringify(H_off).slice(0, 200));
+    const H_offStored = (await readDoc(`groups/${H_med.group_id}`, ADMIN)).body?.fields?.health_goal;
+    check('health: null is on the doc (explicit off)', H_offStored && 'nullValue' in H_offStored, JSON.stringify(H_offStored));
+    const H_offTry = await call('completeGoal', { group_id: H_med.group_id, proof: { health: { metric: 'mindful_minutes', value: 20, target: 10, sources: [] }, share: true } }, dev);
+    check('health: an explicit null disables Health for a preset goal', H_offTry.error === 'FAILED_PRECONDITION', JSON.stringify(H_offTry));
+    const H_offAgain = await call('updateCitySettings', { group_id: H_med.group_id, health_goal: null }, dev);
+    check('health: setting null again is a no-op', H_offAgain.result?.health_goal === null, JSON.stringify(H_offAgain).slice(0, 200));
+    await call('deleteGroup', { group_id: H_med.group_id }, dev);
+
+    console.log('— stop health sharing —');
+    // An older day where dev shared a reading and Bob posted a photo.
+    const H_oldDay = '2026-01-01';
+    await adminPatch(`groups/${H_city.group_id}/days/${H_oldDay}`, {
+      proofs: { mapValue: { fields: {
+        Christian: { mapValue: { fields: {
+          status: { stringValue: 'health' },
+          at: { stringValue: '2026-01-01T12:00:00.000Z' },
+          health: { mapValue: { fields: {
+            metric: { stringValue: 'steps' }, value: { integerValue: '11000' }, target: { integerValue: '10000' },
+            sources: { arrayValue: { values: [{ stringValue: 'iPhone' }] } },
+          } } },
+        } } },
+        Bob: { mapValue: { fields: { status: { stringValue: 'photo' }, key: { stringValue: `proofs/${H_city.group_id}/${bob.uid}/old-12345678.jpg` } } } },
+      } } },
+    }, ['proofs']);
+    const H_stop = await call('stopHealthSharing', {}, dev);
+    check('health: stopHealthSharing strips today + every ledger day', H_stop.result?.entries === 3 && H_stop.result?.groups >= 1, JSON.stringify(H_stop));
+    const H_afterToday = (await readDoc(`groups/${H_city.group_id}`, ADMIN)).body?.fields?.proofs_today?.mapValue?.fields?.entries?.mapValue?.fields ?? {};
+    const H_afterDev = H_afterToday.Christian?.mapValue?.fields ?? {};
+    check(
+      "health: today's entry keeps status + auto, loses the numbers",
+      H_afterDev.status?.stringValue === 'health' && !('health' in H_afterDev) && H_afterDev.auto?.booleanValue === true,
+      JSON.stringify(H_afterDev),
+    );
+    const H_afterL = (await H_ledger()).Christian?.mapValue?.fields ?? {};
+    check("health: today's ledger entry loses the numbers", H_afterL.status?.stringValue === 'health' && !('health' in H_afterL) && !!H_afterL.at, JSON.stringify(H_afterL));
+    const H_oldAfter = (await readDoc(`groups/${H_city.group_id}/days/${H_oldDay}`, ADMIN)).body?.fields?.proofs?.mapValue?.fields ?? {};
+    check(
+      "health: older ledger day stripped, other members untouched",
+      H_oldAfter.Christian?.mapValue?.fields?.status?.stringValue === 'health' && !('health' in (H_oldAfter.Christian?.mapValue?.fields ?? {})) &&
+        H_oldAfter.Bob?.mapValue?.fields?.status?.stringValue === 'photo',
+      JSON.stringify(H_oldAfter),
+    );
+    const H_stopAgain = await call('stopHealthSharing', {}, dev);
+    check('health: stopHealthSharing is idempotent', H_stopAgain.result?.entries === 0, JSON.stringify(H_stopAgain));
+    const H_stopAnon = await call('stopHealthSharing', {});
+    check('health: stopHealthSharing requires auth', H_stopAnon.error === 'UNAUTHENTICATED', JSON.stringify(H_stopAnon));
+    await call('deleteGroup', { group_id: H_city.group_id }, dev);
+  }
+
   console.log('— immediate landing —');
   const countBuilt = (cityMap) =>
     Object.values(cityMap ?? {}).flat().filter((t) => t != null && t !== 'rubble').length;

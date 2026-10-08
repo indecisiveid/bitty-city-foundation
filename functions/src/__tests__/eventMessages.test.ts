@@ -10,6 +10,8 @@ import {
   peerNudgeNotice,
   teammateCompletedNotice,
   testNotice,
+  healthReadingTitle,
+  articleForNumber,
 } from "../eventMessages";
 import { NotificationCategory } from "../push";
 
@@ -57,11 +59,41 @@ describe("event notices keep their words", () => {
     expect(n.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.first.photo.v2" });
   });
 
-  it("a skipped proof reads as a plain finish", () => {
-    const n = teammateCompletedNotice("Riverside", "Tom", { status: "skipped", date: "2026-09-25" });
-    expect(n.title).toBe("✅ Tom finished");
-    expect(n.data).toEqual({ completed_by: "Tom" });
-    expect(n.meta.variant).toBe("teammate_completed.first.v2");
+  it("a skipped proof — or a Health reading kept private — reads as a plain finish", () => {
+    for (const proof of [{ status: "skipped" as const, date: "2026-09-25" }, { status: "health" as const, date: "2026-09-25" }]) {
+      const n = teammateCompletedNotice("Riverside", "Tom", proof);
+      expect(n.title).toBe("✅ Tom finished");
+      expect(n.data).toEqual({ completed_by: "Tom" });
+      expect(n.meta.variant).toBe("teammate_completed.first.v2");
+    }
+  });
+
+  it("a shared Health reading leads with the numbers", () => {
+    const base = { target: 1, sources: ["Apple Watch"] };
+    const health = (h: Record<string, unknown>) =>
+      ({ status: "health" as const, date: "2026-10-07", health: { ...base, ...h } as never });
+    const steps = teammateCompletedNotice("Riverside", "Tom", health({ metric: "steps", value: 12345 }));
+    expect(steps.title).toBe("👟 Tom hit 12,345 steps");
+    expect(steps.body).toBe("Your turn in Riverside.");
+    expect(steps.categoryId).toBe(NotificationCategory.TEAMMATE_COMPLETED);
+    expect(steps.data).toEqual({ completed_by: "Tom", proof_date: "2026-10-07" });
+    expect(steps.meta).toMatchObject({ type: "teammate_completed", priority: "transactional", variant: "teammate_completed.first.health.v2" });
+
+    expect(teammateCompletedNotice("R", "Tom", health({ metric: "exercise_minutes", value: 42 })).title).toBe(
+      "⏱ Tom got 42 min of exercise",
+    );
+    expect(teammateCompletedNotice("R", "Tom", health({ metric: "mindful_minutes", value: 12 })).title).toBe(
+      "🧘 Tom did 12 mindful minutes",
+    );
+    expect(
+      teammateCompletedNotice("R", "Tom", health({ metric: "workout", value: 45, workout: { activity: "run", minutes: 45, km: 8.2 } })).title,
+    ).toBe("🏃 Tom logged an 8.2 km run");
+    expect(
+      teammateCompletedNotice("R", "Tom", health({ metric: "workout", value: 40, workout: { activity: "yoga session", minutes: 40 } })).title,
+    ).toBe("🏃 Tom logged a 40-min yoga session");
+    expect(teammateCompletedNotice("R", "Tom", health({ metric: "workout", value: 30 })).title).toBe(
+      "🏃 Tom logged a 30-min workout",
+    );
   });
 
   it("kudos / nudge carry who sent them", () => {
@@ -80,6 +112,11 @@ describe("labels", () => {
     teammateCompletedNotice("R", "Tom", { status: "photo", date: "2026-09-25" }),
     teammateCompletedNotice("R", "Tom", null, true),
     teammateCompletedNotice("R", "Tom", { status: "photo", date: "2026-09-25" }, true),
+    teammateCompletedNotice("R", "Tom", {
+      status: "health",
+      date: "2026-09-25",
+      health: { metric: "steps", value: 10000, target: 10000, sources: [] },
+    }),
     kudosNotice("A"),
     peerNudgeNotice("A", "x"),
     testNotice(),
@@ -107,5 +144,28 @@ describe("labels", () => {
   it("notice() wraps copy from the other pure modules", () => {
     const meta = { type: "member_joined", category: "crew" as const, priority: "normal" as const, variant: "member_joined.v1" };
     expect(notice({ title: "t", body: "b" }, meta)).toEqual({ title: "t", body: "b", meta });
+  });
+});
+
+describe("healthReadingTitle", () => {
+  const workout = (activity: string, minutes: number, km?: number) => ({
+    metric: "workout" as const,
+    value: minutes,
+    target: 20,
+    sources: ["Strava"],
+    workout: { activity, minutes, ...(km !== undefined ? { km } : {}) },
+  });
+  it("words each metric for the crew", () => {
+    expect(healthReadingTitle("Sam", { metric: "steps", value: 10212, target: 10000, sources: [] })).toBe("👟 Sam hit 10,212 steps");
+    expect(healthReadingTitle("Sam", { metric: "mindful_minutes", value: 12, target: 10, sources: [] })).toBe("🧘 Sam did 12 mindful minutes");
+    expect(healthReadingTitle("Sam", workout("run", 28, 5.2))).toBe("🏃 Sam logged a 5.2 km run");
+  });
+  it("uses 'an' where the number is spoken with a vowel", () => {
+    expect(healthReadingTitle("Sam", workout("run", 45, 8.2))).toBe("🏃 Sam logged an 8.2 km run");
+    expect(healthReadingTitle("Sam", workout("ride", 80))).toBe("🏃 Sam logged an 80-min ride");
+    expect(healthReadingTitle("Sam", workout("walk", 11))).toBe("🏃 Sam logged an 11-min walk");
+    expect(healthReadingTitle("Sam", workout("walk", 21))).toBe("🏃 Sam logged a 21-min walk");
+    expect(articleForNumber(18)).toBe("an");
+    expect(articleForNumber(180)).toBe("a");
   });
 });

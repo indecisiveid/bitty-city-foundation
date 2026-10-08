@@ -11,7 +11,7 @@
 import { PushPayload, NotificationCategory } from "./push";
 import { NoticeMeta } from "./notices";
 import { withArticle } from "./buildings";
-import { ProofStatus } from "./proofs";
+import { HealthReading, ProofStatus } from "./proofs";
 
 export type Notice = PushPayload & { meta: NoticeMeta };
 
@@ -60,37 +60,76 @@ export function buildStalledNotice(label: string, mode: "easy" | "hard"): Notice
 
 /**
  * How a finish was proven, as the push says it: "Tom finished with a photo".
- * A new proof source (Apple Health, Strava, …) is one line here — the push
- * reads "Tom finished with Strava" without touching the copy below.
+ * A new proof source (Strava, …) is one line here — the push reads "Tom
+ * finished with Strava" without touching the copy below. A shared Health
+ * reading has its own headline (the numbers are the news); one kept private,
+ * like a skip, reads as a plain finish — the push never says there was no proof.
  */
 export const PROOF_SOURCES: Partial<Record<ProofStatus, { emoji: string; via: string }>> = {
   photo: { emoji: "📸", via: "a photo" },
 };
 
+/** "a" or "an" before a number as it's spoken: an 8.2 km run, an 11-min walk, an 80-min ride. */
+export function articleForNumber(n: number | string): "a" | "an" {
+  const digits = String(n).split(".")[0];
+  if (digits.startsWith("8")) return "an";
+  // eleven, eighteen — and eleven/eighteen thousand
+  if (/^(11|18)$/.test(digits) || /^(11|18)\d{3}$/.test(digits)) return "an";
+  return "a";
+}
+
+/** The headline for a shared Health reading — the numbers are the news. */
+export function healthReadingTitle(name: string, health: HealthReading): string {
+  switch (health.metric) {
+    case "steps":
+      return `👟 ${name} hit ${health.value.toLocaleString("en-US")} steps`;
+    case "exercise_minutes":
+      return `⏱ ${name} got ${health.value} min of exercise`;
+    case "workout": {
+      const activityLabel = (health.workout?.activity ?? "workout").toLowerCase();
+      const km = health.workout?.km;
+      const minutes = health.workout?.minutes ?? health.value;
+      return km !== undefined
+        ? `🏃 ${name} logged ${articleForNumber(km)} ${km} km ${activityLabel}`
+        : `🏃 ${name} logged ${articleForNumber(minutes)} ${minutes}-min ${activityLabel}`;
+    }
+    case "mindful_minutes":
+      return `🧘 ${name} did ${health.value} mindful minutes`;
+  }
+}
+
 /**
  * A teammate finished. Sent to the members still pending, and only for the
  * first finisher of the day or when one person is left (`last`) — see
- * completeGoal. With proof the title says how, and a tap opens that day's
+ * completeGoal. Carries the Send kudos button: everyone on the list has NOT
+ * completed and `completedName` has, exactly the precondition sendKudos
+ * enforces. With shared proof the title says how, and a tap opens that day's
  * proof (`proof_date`).
  */
 export function teammateCompletedNotice(
   cityName: string,
   completedName: string,
-  proof?: { status: ProofStatus; date: string } | null,
+  proof?: { status: ProofStatus; date: string; health?: HealthReading | null } | null,
   last = false,
 ): Notice {
+  const health = proof?.status === "health" ? proof.health ?? null : null;
   const source = proof ? PROOF_SOURCES[proof.status] : undefined;
+  const shared = health ? "health" : source ? proof!.status : null;
   const meta: NoticeMeta = {
     type: "teammate_completed",
     category: "social",
     priority: "transactional",
-    variant: `teammate_completed.${last ? "last" : "first"}${source ? `.${proof!.status}` : ""}.v2`,
+    variant: `teammate_completed.${last ? "last" : "first"}${shared ? `.${shared}` : ""}.v2`,
   };
   return {
-    title: source ? `${source.emoji} ${completedName} finished with ${source.via}` : `✅ ${completedName} finished`,
+    title: health
+      ? healthReadingTitle(completedName, health)
+      : source
+        ? `${source.emoji} ${completedName} finished with ${source.via}`
+        : `✅ ${completedName} finished`,
     body: last ? `You're the last one in ${cityName}.` : `Your turn in ${cityName}.`,
     categoryId: NotificationCategory.TEAMMATE_COMPLETED,
-    data: { completed_by: completedName, ...(source ? { proof_date: proof!.date } : {}) },
+    data: { completed_by: completedName, ...(shared ? { proof_date: proof!.date } : {}) },
     meta,
   };
 }
