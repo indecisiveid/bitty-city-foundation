@@ -14,6 +14,13 @@
  * The object key is `proofs/{groupId}/{uid}/{random}.jpg`. storage.rules
  * only let a member create under their own uid; `completeGoal` re-checks the
  * shape and owner here so a caller can't attach someone else's photo.
+ *
+ * One photo checked into several cities at once (`completeGoals`, the Home
+ * screen's "Today's goals") is ONE object at `proofs/shared/{uid}/{random}.jpg`.
+ * Only its owner can read it through the rules — crewmates in every city load
+ * it from the entry's `url` (a Firebase download URL the server stamps on the
+ * entry), and the object's `cities` metadata lists who still references it so
+ * deleting one city never takes the photo from another.
  */
 
 import {
@@ -43,6 +50,10 @@ export interface ProofEntry {
   status: ProofStatus;
   /** Storage object key — present iff status === "photo". */
   key?: string;
+  /** Download URL for a photo, stamped by the server so viewers skip the
+   *  getDownloadURL round-trip. The only way crewmates can load a shared
+   *  (multi-city) photo. Absent on entries written before 2026-10. */
+  url?: string;
   /** Only for status "health" when the member shares numbers with the crew. */
   health?: HealthReading;
   /** A health check-in the app made automatically. */
@@ -67,6 +78,41 @@ export function isProofKeyFor(key: unknown, groupId: string, uid: string): key i
   const prefix = `${PROOFS_PREFIX}${groupId}/${uid}/`;
   if (!key.startsWith(prefix)) return false;
   return FILE_RE.test(key.slice(prefix.length));
+}
+
+/** Where one photo checked into several cities lives. Group ids are 20-char
+ *  Firestore auto ids, so "shared" can never be one. */
+export const SHARED_PROOFS_PREFIX = `${PROOFS_PREFIX}shared/`;
+
+export function isSharedProofKeyFor(key: unknown, uid: string): key is string {
+  if (typeof key !== "string") return false;
+  const prefix = `${SHARED_PROOFS_PREFIX}${uid}/`;
+  if (!key.startsWith(prefix)) return false;
+  return FILE_RE.test(key.slice(prefix.length));
+}
+
+export function isSharedProofKey(key: unknown): key is string {
+  return typeof key === "string" && key.startsWith(SHARED_PROOFS_PREFIX);
+}
+
+/** Most cities one `completeGoals` call checks into — the per-account cap. */
+export const MAX_BATCH_CITIES = 100;
+
+/**
+ * `completeGoals`' `group_ids`: a non-empty list of distinct non-empty
+ * strings, at most MAX_BATCH_CITIES. Duplicates are dropped, order kept.
+ * Null when the argument can't be used.
+ */
+export function parseGroupIds(raw: unknown): string[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  if (!raw.every((id) => typeof id === "string" && id.length > 0 && id.length <= 128 && !id.includes("/"))) return null;
+  const ids = [...new Set(raw as string[])];
+  return ids.length <= MAX_BATCH_CITIES ? ids : null;
+}
+
+/** The `cities` metadata on a shared photo: comma-joined group ids. */
+export function parseCities(raw: unknown): string[] {
+  return typeof raw === "string" ? raw.split(",").filter(Boolean) : [];
 }
 
 export const MAX_HEALTH_SOURCES = 3;
@@ -116,7 +162,9 @@ const isEntry = (v: unknown): v is ProofEntry => {
   if (!v || typeof v !== "object") return false;
   const e = v as ProofEntry;
   if (e.status === "skipped") return e.key === undefined;
-  if (e.status === "photo") return typeof e.key === "string" && e.key.startsWith(PROOFS_PREFIX);
+  if (e.status === "photo") {
+    return typeof e.key === "string" && e.key.startsWith(PROOFS_PREFIX) && (e.url === undefined || typeof e.url === "string");
+  }
   if (e.status === "health") {
     return (
       e.key === undefined &&

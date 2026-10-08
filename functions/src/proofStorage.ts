@@ -12,17 +12,74 @@
 import { getStorage } from "firebase-admin/storage";
 import { randomUUID } from "crypto";
 import { defineString } from "firebase-functions/params";
+import { parseCities } from "./proofs";
 
 export const PROOFS_BUCKET_DEFAULT = "bitty-city.firebasestorage.app";
 export const proofsBucket = defineString("PROOFS_BUCKET", { default: PROOFS_BUCKET_DEFAULT });
 
-/** Size in bytes, or null when the object doesn't exist. */
-export async function proofObjectSize(key: string, bucketName: string): Promise<number | null> {
+export interface ProofObjectInfo {
+  size: number;
+  /** Firebase download URL (existing token, minted if the upload had none). */
+  url: string;
+}
+
+const isNotFound = (err: unknown) => (err as { code?: number }).code === 404;
+
+/**
+ * Everything `completeGoal(s)` needs from a claimed upload, in ONE metadata
+ * read: whether it exists, its size, and a download URL for the entry and the
+ * push banner — however many cities it lands in. A token is minted (one
+ * write) only if the upload somehow has none. Null when the object doesn't
+ * exist.
+ */
+export async function inspectProofObject(key: string, bucketName: string): Promise<ProofObjectInfo | null> {
   const f = getStorage().bucket(bucketName).file(key);
-  const [exists] = await f.exists();
-  if (!exists) return null;
+  let meta;
+  try {
+    [meta] = await f.getMetadata();
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+  let token = String(meta.metadata?.firebaseStorageDownloadTokens ?? "").split(",")[0];
+  if (!token) {
+    token = randomUUID();
+    await f.setMetadata({ metadata: { firebaseStorageDownloadTokens: token } });
+  }
+  return { size: Number(meta.size ?? 0), url: downloadUrlFor(bucketName, key, token) };
+}
+
+/**
+ * Record that these cities now show a shared photo (its `cities` metadata).
+ * Called once per check-in with every city that filed it.
+ */
+export async function addSharedProofCities(key: string, cities: string[], bucketName: string): Promise<void> {
+  const f = getStorage().bucket(bucketName).file(key);
   const [meta] = await f.getMetadata();
-  return Number(meta.size ?? 0);
+  const had = parseCities(meta.metadata?.cities);
+  const merged = [...new Set([...had, ...cities])];
+  if (merged.length !== had.length) await f.setMetadata({ metadata: { cities: merged.join(",") } });
+}
+
+/**
+ * A city lets go of a shared photo (the city was deleted, or the person who
+ * posted it left the app). The object goes once no city references it.
+ */
+export async function releaseSharedProof(key: string, groupId: string, bucketName: string): Promise<void> {
+  const f = getStorage().bucket(bucketName).file(key);
+  let meta;
+  try {
+    [meta] = await f.getMetadata();
+  } catch (err) {
+    if (isNotFound(err)) return;
+    throw err;
+  }
+  const left = parseCities(meta.metadata?.cities).filter((id) => id !== groupId);
+  if (left.length === 0) {
+    await deleteProofObject(key, bucketName);
+  } else {
+    await f.setMetadata({ metadata: { cities: left.join(",") } });
+  }
 }
 
 /**
@@ -57,7 +114,7 @@ export async function deleteProofObject(key: string, bucketName: string): Promis
   try {
     await getStorage().bucket(bucketName).file(key).delete();
   } catch (err) {
-    if ((err as { code?: number }).code === 404) return;
+    if (isNotFound(err)) return;
     throw err;
   }
 }

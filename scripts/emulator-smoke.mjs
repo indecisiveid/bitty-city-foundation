@@ -442,6 +442,75 @@ async function main() {
   const ledgerAfterCity = await readDoc(`groups/${pg.group_id}/days/${today}`, ADMIN);
   check('deleteGroup erases the day ledger', ledgerAfterCity.status === 404, `status=${ledgerAfterCity.status}`);
 
+  console.log('— one check-in, every city with the goal (completeGoals) —');
+  {
+    const mk = async (name) => (await call(
+      'createGroup',
+      { group_name: name, member: 'Christian', daily_goal: 'Read 10 pages', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+      dev,
+    )).result;
+    const A = await mk('Shelf A');
+    const B = await mk('Shelf B');
+    await call('joinGroup', { group_code: A.group_code, member: 'Bob' }, bob);
+    await call('joinGroup', { group_code: B.group_code, member: 'Bob' }, bob);
+    const sKey = `proofs/shared/${dev.uid}/shared-${Date.now()}.jpg`;
+
+    const bobShared = await putObject(`proofs/shared/${dev.uid}/bob-${Date.now()}.jpg`, TINY_JPEG, bob);
+    check("rules: nobody uploads into someone else's shared slot", bobShared.status === 403, `status=${bobShared.status}`);
+    const upShared = await putObject(sKey, TINY_JPEG, dev);
+    check('rules: own shared upload accepted', upShared.status === 200, `status=${upShared.status}`);
+    check('rules: a crewmate cannot read a shared photo through the rules', (await getObject(sKey, bob)).status === 403);
+
+    const stolen = await call('completeGoals', { group_ids: [A.group_id, B.group_id], proof: { key: sKey } }, bob);
+    check("completeGoals with someone else's shared key is refused", stolen.error === 'INVALID_ARGUMENT', JSON.stringify(stolen));
+    const notMine = await call('completeGoals', { group_ids: [A.group_id], proof: { key: `proofs/${B.group_id}/${dev.uid}/abcdefgh.jpg` } }, dev);
+    check("a per-city key only counts for its own city", notMine.error === 'INVALID_ARGUMENT', JSON.stringify(notMine));
+    const empty = await call('completeGoals', { group_ids: [] }, dev);
+    check('completeGoals needs at least one city', empty.error === 'INVALID_ARGUMENT', JSON.stringify(empty));
+
+    // Eve's city is in the list too: it refuses on its own, the rest go through.
+    const evesCity = (await call(
+      'createGroup',
+      { group_name: 'Not Yours', member: 'Eve', daily_goal: 'Read 10 pages', goal_reset_time: '00:00', goal_reset_timezone: 'UTC' },
+      eve,
+    )).result;
+    const batch = await call('completeGoals', { group_ids: [A.group_id, B.group_id, A.group_id, evesCity.group_id], proof: { key: sKey } }, dev);
+    const rs = batch.result?.results ?? [];
+    check('completeGoals: one result per distinct city, in order', rs.map((r) => r.group_id).join() === [A.group_id, B.group_id, evesCity.group_id].join(), JSON.stringify(batch).slice(0, 300));
+    check('completeGoals: both of my cities recorded', rs[0]?.ok && rs[0]?.recorded && rs[1]?.ok && rs[1]?.recorded, JSON.stringify(rs));
+    check("completeGoals: a city I'm not in refuses on its own", rs[2]?.ok === false && rs[2]?.code === 'failed-precondition', JSON.stringify(rs[2]));
+
+    const docA = (await call('getGroup', { group_id: A.group_id }, dev)).result;
+    const docB = (await call('getGroup', { group_id: B.group_id }, dev)).result;
+    const eA = docA?.proofs_today?.entries?.Christian;
+    const eB = docB?.proofs_today?.entries?.Christian;
+    check('the same photo is filed in both cities', eA?.status === 'photo' && eA?.key === sKey && eB?.key === sKey, JSON.stringify([eA, eB]));
+    check('the entry carries its download URL', typeof eA?.url === 'string' && eA.url === eB?.url && eA.url.includes('token='), eA?.url);
+    if (eA?.url) {
+      const viaUrl = await fetch(eA.url.replace('https://firebasestorage.googleapis.com', STORAGE));
+      check('a crewmate loads the shared photo from the URL', viaUrl.status === 200, `status=${viaUrl.status}`);
+    }
+    const ledgerA = (await readDoc(`groups/${A.group_id}/days/${eA ? docA.proofs_today.date : ''}`, bob)).body?.fields?.proofs?.mapValue?.fields?.Christian?.mapValue?.fields;
+    check('the day ledger has the key and URL', ledgerA?.key?.stringValue === sKey && !!ledgerA?.url?.stringValue, JSON.stringify(ledgerA).slice(0, 200));
+
+    const metaOf = async (k) => {
+      const res = await fetch(`${STORAGE}/v0/b/${BUCKET}/o/${encodeURIComponent(k)}`, { headers: { Authorization: 'Bearer owner' } });
+      return res.status === 200 ? await res.json() : null;
+    };
+    const cities = (await metaOf(sKey))?.metadata?.cities ?? '';
+    check('one object, referencing exactly the cities that filed it', cities.split(',').sort().join() === [A.group_id, B.group_id].sort().join(), cities);
+
+    const again = await call('completeGoals', { group_ids: [A.group_id, B.group_id], proof: { skipped: true } }, dev);
+    check('completeGoals is idempotent (recorded: false)', (again.result?.results ?? []).every((r) => r.ok && r.recorded === false), JSON.stringify(again));
+
+    await call('deleteGroup', { group_id: A.group_id }, dev);
+    check('deleting one city keeps a photo another city still shows', (await getObject(sKey, ADMIN)).status === 200);
+    check("…and drops that city's reference", (await metaOf(sKey))?.metadata?.cities === B.group_id, (await metaOf(sKey))?.metadata?.cities);
+    await call('deleteGroup', { group_id: B.group_id }, dev);
+    check('deleting the last city that shows it deletes the photo', (await getObject(sKey, ADMIN)).status === 404);
+    await call('deleteGroup', { group_id: evesCity.group_id }, eve);
+  }
+
   console.log('— account deletion erases a member\'s proofs —');
   const quinn = await signUp(`quinn-${Date.now()}@example.com`, 'password123');
   const qc = (await call(

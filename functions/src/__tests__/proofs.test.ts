@@ -229,3 +229,47 @@ describe("resolveHealthProof", () => {
     expect(resolveHealthProof({ health: { ...READING, value: 10000 }, share: true }, STEPS_CITY).ok).toBe(true);
   });
 });
+
+import { isSharedProofKeyFor, isSharedProofKey, parseGroupIds, parseCities, MAX_BATCH_CITIES } from "../proofs";
+
+describe("shared (multi-city) photo keys", () => {
+  it("accepts only the caller's own slot", () => {
+    expect(isSharedProofKeyFor("proofs/shared/u1/abcdefgh.jpg", "u1")).toBe(true);
+    expect(isSharedProofKeyFor("proofs/shared/u2/abcdefgh.jpg", "u1")).toBe(false);
+    expect(isSharedProofKeyFor("proofs/shared/u1/../u2/abcdefgh.jpg", "u1")).toBe(false);
+    expect(isSharedProofKeyFor("proofs/shared/u1/abcdefgh.png", "u1")).toBe(false);
+    expect(isSharedProofKeyFor(null, "u1")).toBe(false);
+  });
+  it("a per-city key is not shared, and never passes as one city's key", () => {
+    expect(isSharedProofKey("proofs/g1/u1/abcdefgh.jpg")).toBe(false);
+    expect(isSharedProofKey("proofs/shared/u1/abcdefgh.jpg")).toBe(true);
+    expect(isProofKeyFor("proofs/shared/u1/abcdefgh.jpg", "g1", "u1")).toBe(false);
+  });
+  it("a photo entry may carry its download URL", () => {
+    const raw = { date: "2026-10-07", entries: { Ann: { status: "photo", key: "proofs/shared/u1/abcdefgh.jpg", url: "https://x" } } };
+    expect(normalizeProofs(raw, "2026-10-07").entries.Ann).toEqual(raw.entries.Ann);
+    const bad = { date: "2026-10-07", entries: { Ann: { status: "photo", key: "proofs/g/u/abcdefgh.jpg", url: 7 } } };
+    expect(normalizeProofs(bad, "2026-10-07").entries.Ann).toBeUndefined();
+  });
+});
+
+describe("parseGroupIds", () => {
+  it("dedupes and keeps order", () => {
+    expect(parseGroupIds(["b", "a", "b"])).toEqual(["b", "a"]);
+  });
+  it("refuses empty, non-arrays, bad ids and too many", () => {
+    expect(parseGroupIds([])).toBeNull();
+    expect(parseGroupIds("a")).toBeNull();
+    expect(parseGroupIds(["a", ""])).toBeNull();
+    expect(parseGroupIds(["a/b"])).toBeNull();
+    expect(parseGroupIds([1])).toBeNull();
+    expect(parseGroupIds(Array.from({ length: MAX_BATCH_CITIES + 1 }, (_, i) => `g${i}`))).toBeNull();
+    expect(parseGroupIds(Array.from({ length: MAX_BATCH_CITIES }, (_, i) => `g${i}`))).toHaveLength(MAX_BATCH_CITIES);
+  });
+});
+
+it("parseCities reads the comma-joined metadata", () => {
+  expect(parseCities("a,b")).toEqual(["a", "b"]);
+  expect(parseCities("")).toEqual([]);
+  expect(parseCities(undefined)).toEqual([]);
+});

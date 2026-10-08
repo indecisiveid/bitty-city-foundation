@@ -7,6 +7,7 @@ export {
   joinGroup,
   getGroup,
   completeGoal,
+  completeGoals,
   selectBuild,
   deleteGroup,
   leaveGroup,

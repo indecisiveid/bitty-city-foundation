@@ -42,7 +42,8 @@ functions/src/
                      goal category, health_goal (object | null = off). NOT reset time/timezone (moving the day
                      boundary mid-game needs its own design)
   groupHandlers.ts   Callables: createGroup, joinGroup, getGroup,
-                     completeGoal, selectBuild, deleteGroup, leaveGroup,
+                     completeGoal, completeGoals (one check-in, many cities —
+                     Home's "Today's goals"), selectBuild, deleteGroup, leaveGroup,
                      repairStreak, rescueBuild, repairTile, repairPark,
                      upsertProfile
   demoHandlers.ts    Dev-only callables (demoAsteroid/FillCity/SetBuildings/

@@ -44,6 +44,9 @@ import { buildProgressOf } from "./buildings";
 import { isBuildable, buildableIds, daysFor, labelFor, minBuildingsFor } from "./buildCatalog";
 import {
   isProofKeyFor,
+  isSharedProofKeyFor,
+  isSharedProofKey,
+  parseGroupIds,
   applyProof,
   photoCount,
   sharedProofCount,
@@ -67,7 +70,15 @@ import {
 } from "./gameMode";
 import { easyModeSuggestionMessage } from "./crewMessages";
 import { PushPayload } from "./push";
-import { proofsBucket, proofObjectSize, proofImageUrl, deleteProofObject, deleteProofPrefix } from "./proofStorage";
+import {
+  proofsBucket,
+  inspectProofObject,
+  addSharedProofCities,
+  releaseSharedProof,
+  proofImageUrl,
+  deleteProofObject,
+  deleteProofPrefix,
+} from "./proofStorage";
 import { applyBrickEntry, bricksForLanding } from "./bricks";
 import { withoutMemberComments } from "./comments";
 
@@ -151,35 +162,43 @@ export function memberNameForUid(
 type PendingProof = { kind: "ready"; entry: ProofEntry } | { kind: "health"; arg: HealthProofArg };
 
 /**
- * `completeGoal` proof argument. Absent (old binaries) or `{skipped:true}`
- * → "skipped". `{health, share, auto?}` → a Health check-in, judged in the
- * transaction by `healthEntryFor`. `{key}` → must be under this caller's own
- * slot in this group, and the object must already be in the bucket and
- * within the size cap.
+ * `completeGoal(s)` proof argument. Absent (old binaries) or `{skipped:true}`
+ * → "skipped". `{health, share, auto?}` → a Health check-in, judged in each
+ * city's transaction by `healthEntryFor`. `{key}` → must be one of this
+ * caller's uploads: under their own slot in the (single) city, or a shared
+ * photo under `proofs/shared/{uid}/` — the one object a multi-city check-in
+ * uploads. The object must already be in the bucket and within the size cap.
+ *
+ * One Storage metadata read covers existence, size, and the download URL that
+ * goes on the entry (and the push banner), however many cities it lands in.
  */
-async function resolveProof(raw: unknown, groupId: string, uid: string): Promise<PendingProof> {
+async function resolveProof(raw: unknown, groupIds: string[], uid: string): Promise<PendingProof> {
   const proof = raw as { key?: unknown; skipped?: unknown } | undefined;
   if (!proof || proof.skipped === true) return { kind: "ready", entry: { status: "skipped" } };
   if (isHealthProofArg(proof)) return { kind: "health", arg: proof };
-  if (!isProofKeyFor(proof.key, groupId, uid)) {
+  const ownKey =
+    isSharedProofKeyFor(proof.key, uid) || (groupIds.length === 1 && isProofKeyFor(proof.key, groupIds[0], uid));
+  if (!ownKey) {
     throw new HttpsError("invalid-argument", "proof.key is not one of your uploads for this group");
   }
+  const key = proof.key as string;
   const bucket = proofsBucket.value();
-  const size = await proofObjectSize(proof.key, bucket);
-  if (size == null) {
+  const info = await inspectProofObject(key, bucket);
+  if (info == null) {
     throw new HttpsError("failed-precondition", "Photo upload didn't finish — try again or skip");
   }
-  if (size > MAX_PROOF_BYTES) {
-    await deleteProofObject(proof.key, bucket);
+  if (info.size > MAX_PROOF_BYTES) {
+    await deleteProofObject(key, bucket);
     throw new HttpsError("failed-precondition", "Photo is too large — try again or skip");
   }
-  return { kind: "ready", entry: { status: "photo", key: proof.key } };
+  return { kind: "ready", entry: { status: "photo", key, url: info.url } };
 }
 
-/** A photo proof's picture on its push, so the banner shows it (push.imageUrl). */
+/** A photo proof's picture on its push, so the banner shows it (push.imageUrl).
+ *  New entries carry their URL; only an entry without one costs a lookup. */
 async function withProofImage<T extends PushPayload>(payload: T, entry: ProofEntry): Promise<T> {
   if (entry.status !== "photo" || !entry.key) return payload;
-  const imageUrl = await proofImageUrl(entry.key, proofsBucket.value());
+  const imageUrl = entry.url ?? (await proofImageUrl(entry.key, proofsBucket.value()));
   return imageUrl ? { ...payload, imageUrl } : payload;
 }
 
@@ -773,14 +792,31 @@ export function dayCompleteMessage(data: FirebaseFirestore.DocumentData, photos 
   return { title: "🎉 Everyone's in", body: `The whole crew finished in ${cityName}.${seePhotos}` };
 }
 
-export const completeGoal = onCall({ enforceAppCheck: true }, async (request) => {
-  const uid = requireAuth(request);
-  const { group_id, proof } = request.data;
+/** What one city's completion did — see `completeInGroup`. */
+interface CityCompletion {
+  response: ReturnType<typeof groupToResponse>;
+  /** True when this call recorded a new completion (false on the re-tap). */
+  recorded: boolean;
+  /** The city's timezone — for the completion's local time in presence. */
+  timezone: string;
+}
 
-  if (!group_id) {
-    throw new HttpsError("invalid-argument", "group_id is required");
-  }
-
+/**
+ * Record the caller's completion in one city: day processing fallback, the
+ * transaction (proof bucket, day ledger, immediate landing, quests), then the
+ * landing bricks and the crew pushes. Shared by `completeGoal` (one city) and
+ * `completeGoals` (Home's "Today's goals" — every city with the same goal).
+ *
+ * `getProof` is awaited after the membership check, so a non-member hears
+ * "not a member" rather than anything about the photo; `completeGoals`
+ * resolves the proof once up front and hands every city the same result.
+ * Presence is NOT touched here — the callers do it once per call.
+ */
+async function completeInGroup(
+  uid: string,
+  group_id: string,
+  getProof: () => Promise<PendingProof>,
+): Promise<CityCompletion> {
   const groupRef = db().collection("groups").doc(group_id);
   let finalData: FirebaseFirestore.DocumentData;
 
@@ -802,7 +838,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   // Verify the proof OUTSIDE the transaction — it's a network round-trip to
   // Storage and Firestore transactions may retry. A Health check-in is judged
   // inside, against the fresh city doc.
-  const pendingProof = await resolveProof(proof, group_id, uid);
+  const pendingProof = await getProof();
   let proofEntry: ProofEntry = pendingProof.kind === "ready" ? pendingProof.entry : { status: "health" };
 
   // Set only when THIS call is the one that records a new completion (not the
@@ -947,12 +983,6 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
   // "Teammate completed" push → nudge the crew members who still haven't
   // finished today (the pressure's on them). Best-effort, after the write.
   if (completedName) {
-    // A completion is the strongest presence signal there is, and its local
-    // time is the data the personal-send-time reminders will be built on.
-    await touchLastSeen(uid, {
-      force: true,
-      completionMinutes: localMinutesOf(new Date(), finalData!.goal_reset_timezone ?? "UTC"),
-    });
     const done: string[] = finalData!.completions_today ?? [];
     // The roster for today is the ACTIVE members — someone on vacation is
     // neither nudged nor waited for.
@@ -1009,8 +1039,114 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
     }
   }
 
-  return groupToResponse(group_id, finalData!);
+  return {
+    response: groupToResponse(group_id, finalData!),
+    recorded: completedName !== null,
+    timezone: finalData!.goal_reset_timezone ?? "UTC",
+  };
+}
+
+/**
+ * A completion is the strongest presence signal there is, and its local time
+ * is the data the personal-send-time reminders will be built on. Once per
+ * call — checking into five cities is one moment, not five.
+ */
+async function touchCompletionPresence(uid: string, timezone: string): Promise<void> {
+  await touchLastSeen(uid, { force: true, completionMinutes: localMinutesOf(new Date(), timezone) });
+}
+
+export const completeGoal = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const { group_id, proof } = request.data;
+
+  if (!group_id) {
+    throw new HttpsError("invalid-argument", "group_id is required");
+  }
+
+  let pending: PendingProof | null = null;
+  const result = await completeInGroup(uid, group_id, async () => {
+    pending = await resolveProof(proof, [group_id], uid);
+    return pending;
+  });
+  if (result.recorded) {
+    await touchCompletionPresence(uid, result.timezone);
+    // A shared photo (uploaded by a newer app for a one-city check-in) has to
+    // know this city references it, so deleting another city keeps it.
+    const p = pending as PendingProof | null;
+    if (p?.kind === "ready" && isSharedProofKey(p.entry.key)) {
+      await addSharedProofCities(p.entry.key, [group_id], proofsBucket.value());
+    }
+  }
+  return result.response;
 });
+
+/** How many cities a `completeGoals` call works on at once. */
+const BATCH_CONCURRENCY = 6;
+
+/**
+ * Check in to several cities in one call — Home's "Today's goals" section,
+ * where every city sharing a goal gets one "I'm done" and one photo.
+ *
+ *   { group_ids: string[], proof?: same as completeGoal }
+ *   → { results: [{ group_id, ok: true, recorded } | { group_id, ok: false, code, message }] }
+ *
+ * The proof is resolved ONCE (one Storage read) and the same entry — same
+ * key, same URL — is filed in every city; a photo is uploaded once to
+ * `proofs/shared/{uid}/`, never copied. Each city then runs exactly what
+ * `completeGoal` runs, a few at a time. One city refusing (paused, you're on
+ * vacation, not a member any more) doesn't stop the others; its reason comes
+ * back in its result. The response is deliberately small: the app's live
+ * listeners already carry each city's new state.
+ */
+export const completeGoals = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = requireAuth(request);
+  const groupIds = parseGroupIds(request.data?.group_ids);
+  if (!groupIds) {
+    throw new HttpsError("invalid-argument", "group_ids must be a non-empty list of city ids (at most 100)");
+  }
+
+  // A bad photo fails the whole call before any city is touched.
+  const pending = await resolveProof(request.data?.proof, groupIds, uid);
+  const getProof = async () => pending;
+
+  type Result =
+    | { group_id: string; ok: true; recorded: boolean }
+    | { group_id: string; ok: false; code: string; message: string };
+  const results: Result[] = new Array(groupIds.length);
+  let timezone: string | null = null;
+  let next = 0;
+  const worker = async () => {
+    while (next < groupIds.length) {
+      const i = next++;
+      const group_id = groupIds[i];
+      try {
+        const done = await completeInGroup(uid, group_id, getProof);
+        if (done.recorded) timezone ??= done.timezone;
+        results[i] = { group_id, ok: true, recorded: done.recorded };
+      } catch (err) {
+        const e = err instanceof HttpsError ? err : null;
+        if (!e) console.error("[completeGoals] city failed", group_id, err);
+        results[i] = {
+          group_id,
+          ok: false,
+          code: e?.code ?? "internal",
+          message: e?.message ?? "Couldn't check in to this city",
+        };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, groupIds.length) }, worker));
+
+  if (timezone) await touchCompletionPresence(uid, timezone);
+  if (pending.kind === "ready" && isSharedProofKey(pending.entry.key)) {
+    // Only the cities that actually filed the photo hold a reference to it.
+    const filed = results.filter((r) => r.ok && r.recorded).map((r) => r.group_id);
+    if (filed.length > 0) await addSharedProofCities(pending.entry.key, filed, proofsBucket.value());
+  }
+  return { results };
+});
+
+
 
 // --- selectBuild ---
 
@@ -1536,10 +1672,34 @@ export const leaveGroup = onCall({ enforceAppCheck: true }, async (request) => {
 // removed explicitly. Both run BEFORE the doc delete, and throw, so a failure
 // leaves the request retryable instead of reporting success with photos left.
 
+/**
+ * Shared (multi-city) photos this city's ledger references, optionally only
+ * one member's. They live outside the city's prefix, so they're released one
+ * by one — and only deleted once no other city still shows them.
+ */
+function sharedKeysIn(days: FirebaseFirestore.QuerySnapshot, name?: string): Set<string> {
+  const keys = new Set<string>();
+  for (const day of days.docs) {
+    const proofs = (day.data().proofs ?? {}) as Record<string, { key?: unknown }>;
+    for (const [member, entry] of Object.entries(proofs)) {
+      if (name !== undefined && member !== name) continue;
+      if (isSharedProofKey(entry?.key)) keys.add(entry.key);
+    }
+  }
+  return keys;
+}
+
+async function releaseSharedProofs(keys: Set<string>, groupId: string): Promise<void> {
+  const bucket = proofsBucket.value();
+  await Promise.all([...keys].map((key) => releaseSharedProof(key, groupId, bucket)));
+}
+
 /** A whole city: every member's photos and the full day ledger. */
 async function eraseCityProofs(groupId: string): Promise<void> {
+  const daysRef = db().collection("groups").doc(groupId).collection("days");
+  await releaseSharedProofs(sharedKeysIn(await daysRef.get()), groupId);
   await deleteProofPrefix(`proofs/${groupId}/`, proofsBucket.value());
-  await db().recursiveDelete(db().collection("groups").doc(groupId).collection("days"));
+  await db().recursiveDelete(daysRef);
 }
 
 /** One member leaving the app: their photos and their ledger entries only. */
@@ -1547,6 +1707,7 @@ async function eraseMemberProofs(groupId: string, uid: string, name: string): Pr
   await deleteProofPrefix(`proofs/${groupId}/${uid}/`, proofsBucket.value());
   const groupRef = db().collection("groups").doc(groupId);
   const days = await groupRef.collection("days").get();
+  await releaseSharedProofs(sharedKeysIn(days, name), groupId);
   let batch = db().batch();
   let ops = 0;
   for (const day of days.docs) {
@@ -1662,6 +1823,10 @@ export const deleteAccount = onCall({ enforceAppCheck: true }, async (request) =
       });
     }
   }
+
+  // Whatever shared (multi-city) photos are left are theirs alone — every
+  // city above already released its reference.
+  await deleteProofPrefix(`proofs/shared/${uid}/`, proofsBucket.value());
 
   await userRef.delete();
   await getAuth().deleteUser(uid);

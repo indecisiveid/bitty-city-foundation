@@ -19,6 +19,22 @@ service firebase.storage {
         && request.resource.size <= 5 * 1024 * 1024;
       allow update, delete: if false;
     }
+    // One photo checked into several cities at once (completeGoals). Only the
+    // owner reads it through the rules; crewmates load it from the download
+    // URL the server stamps on each city's proof entry, so membership in
+    // every one of those cities never has to be evaluated here. More specific
+    // than the match above ("shared" is never a group id), and that match's
+    // firestore.get on groups/shared denies anyone else regardless.
+    match /proofs/shared/{uid}/{file} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null
+        && resource == null
+        && request.auth.uid == uid
+        && file.matches('[A-Za-z0-9-]{8,64}\\.jpg')
+        && request.resource.contentType == 'image/jpeg'
+        && request.resource.size <= 5 * 1024 * 1024;
+      allow update, delete: if false;
+    }
     // Nothing else in the bucket is reachable from a client.
     match /{path=**} {
       allow read, write: if false;
