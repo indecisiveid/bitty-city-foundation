@@ -15,6 +15,8 @@ import {
   teammateCompletedNotice,
   proofPostedNotice,
   testNotice,
+  healthReadingTitle,
+  articleForNumber,
 } from "../eventMessages";
 import { NotificationCategory } from "../push";
 
@@ -68,11 +70,11 @@ describe("event notices keep their words", () => {
       "🧘 Tom did 12 mindful minutes",
     );
     expect(
-      teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 45, workout: { activity: "Running", minutes: 45, km: 8.2 } }).title,
-    ).toBe("🏃 Tom logged a 8.2 km running");
+      teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 45, workout: { activity: "run", minutes: 45, km: 8.2 } }).title,
+    ).toBe("🏃 Tom logged an 8.2 km run");
     expect(
-      teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 40, workout: { activity: "Yoga", minutes: 40 } }).title,
-    ).toBe("🏃 Tom logged a 40-min yoga");
+      teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 40, workout: { activity: "yoga session", minutes: 40 } }).title,
+    ).toBe("🏃 Tom logged a 40-min yoga session");
     expect(teammateCompletedNotice("R", "Tom", "d", { ...base, metric: "workout", value: 30 }).title).toBe(
       "🏃 Tom logged a 30-min workout",
     );
@@ -148,5 +150,28 @@ describe("labels", () => {
   it("notice() wraps copy from the other pure modules", () => {
     const meta = { type: "member_joined", category: "crew" as const, priority: "normal" as const, variant: "member_joined.v1" };
     expect(notice({ title: "t", body: "b" }, meta)).toEqual({ title: "t", body: "b", meta });
+  });
+});
+
+describe("healthReadingTitle", () => {
+  const workout = (activity: string, minutes: number, km?: number) => ({
+    metric: "workout" as const,
+    value: minutes,
+    target: 20,
+    sources: ["Strava"],
+    workout: { activity, minutes, ...(km !== undefined ? { km } : {}) },
+  });
+  it("words each metric for the crew", () => {
+    expect(healthReadingTitle("Sam", { metric: "steps", value: 10212, target: 10000, sources: [] })).toBe("👟 Sam hit 10,212 steps");
+    expect(healthReadingTitle("Sam", { metric: "mindful_minutes", value: 12, target: 10, sources: [] })).toBe("🧘 Sam did 12 mindful minutes");
+    expect(healthReadingTitle("Sam", workout("run", 28, 5.2))).toBe("🏃 Sam logged a 5.2 km run");
+  });
+  it("uses 'an' where the number is spoken with a vowel", () => {
+    expect(healthReadingTitle("Sam", workout("run", 45, 8.2))).toBe("🏃 Sam logged an 8.2 km run");
+    expect(healthReadingTitle("Sam", workout("ride", 80))).toBe("🏃 Sam logged an 80-min ride");
+    expect(healthReadingTitle("Sam", workout("walk", 11))).toBe("🏃 Sam logged an 11-min walk");
+    expect(healthReadingTitle("Sam", workout("walk", 21))).toBe("🏃 Sam logged a 21-min walk");
+    expect(articleForNumber(18)).toBe("an");
+    expect(articleForNumber(180)).toBe("a");
   });
 });

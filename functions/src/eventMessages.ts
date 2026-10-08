@@ -62,6 +62,15 @@ export function buildStalledNotice(label: string, mode: "easy" | "hard"): Notice
  * The headline for a shared Health reading — the numbers are the news.
  * `teammate_completed.health.v1`.
  */
+/** "a" or "an" before a number as it's spoken: an 8.2 km run, an 11-min walk, an 80-min ride. */
+export function articleForNumber(n: number | string): "a" | "an" {
+  const digits = String(n).split(".")[0];
+  if (digits.startsWith("8")) return "an";
+  // eleven, eighteen — and eleven/eighteen thousand
+  if (/^(11|18)$/.test(digits) || /^(11|18)\d{3}$/.test(digits)) return "an";
+  return "a";
+}
+
 export function healthReadingTitle(name: string, health: HealthReading): string {
   switch (health.metric) {
     case "steps":
@@ -71,9 +80,10 @@ export function healthReadingTitle(name: string, health: HealthReading): string 
     case "workout": {
       const activityLabel = (health.workout?.activity ?? "workout").toLowerCase();
       const km = health.workout?.km;
+      const minutes = health.workout?.minutes ?? health.value;
       return km !== undefined
-        ? `🏃 ${name} logged a ${km} km ${activityLabel}`
-        : `🏃 ${name} logged a ${health.workout?.minutes ?? health.value}-min ${activityLabel}`;
+        ? `🏃 ${name} logged ${articleForNumber(km)} ${km} km ${activityLabel}`
+        : `🏃 ${name} logged ${articleForNumber(minutes)} ${minutes}-min ${activityLabel}`;
     }
     case "mindful_minutes":
       return `🧘 ${name} did ${health.value} mindful minutes`;
