@@ -67,6 +67,14 @@ export interface PushPayload {
    * "passive") — quiet hours (notices.ts) never drop a push, they soften it.
    */
   quiet?: boolean;
+  /**
+   * A picture for the banner (a teammate's proof photo). Sent as FCM's APNs
+   * image with `mutable-content`, so the app's notification service extension
+   * can download it and attach it before iOS shows the banner. Mirrored into
+   * data as `image_url` for the foreground banner Notifee draws. An app
+   * without the extension ignores it and shows the text.
+   */
+  imageUrl?: string;
 }
 
 /** FCM registration tokens are opaque, non-empty strings. */
@@ -103,6 +111,7 @@ export function apsFor(payload: PushPayload): Aps {
     ...(payload.quiet ? { "interruption-level": "passive" } : { sound: "default" }),
     ...(payload.categoryId ? { category: payload.categoryId } : {}),
     ...(payload.threadId ? { threadId: payload.threadId } : {}),
+    ...(payload.imageUrl ? { mutableContent: true } : {}),
   };
 }
 
@@ -115,6 +124,7 @@ export function dataFor(payload: PushPayload): Record<string, string> {
   return stringifyData({
     ...(payload.data ?? {}),
     ...(payload.categoryId ? { category: payload.categoryId } : {}),
+    ...(payload.imageUrl ? { image_url: payload.imageUrl } : {}),
   });
 }
 
@@ -141,7 +151,7 @@ export async function sendPush(
         tokens: group,
         notification: { title: payload.title, body: payload.body },
         data,
-        apns: { payload: { aps } },
+        apns: { payload: { aps }, ...(payload.imageUrl ? { fcmOptions: { imageUrl: payload.imageUrl } } : {}) },
       });
 
       if (res.failureCount > 0) {

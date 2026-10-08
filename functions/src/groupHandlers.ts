@@ -66,7 +66,8 @@ import {
   snapProgress,
 } from "./gameMode";
 import { easyModeSuggestionMessage } from "./crewMessages";
-import { proofsBucket, proofObjectSize, deleteProofObject, deleteProofPrefix } from "./proofStorage";
+import { PushPayload } from "./push";
+import { proofsBucket, proofObjectSize, proofImageUrl, deleteProofObject, deleteProofPrefix } from "./proofStorage";
 import { applyBrickEntry, bricksForLanding } from "./bricks";
 
 const db = () => getFirestore();
@@ -172,6 +173,13 @@ async function resolveProof(raw: unknown, groupId: string, uid: string): Promise
     throw new HttpsError("failed-precondition", "Photo is too large — try again or skip");
   }
   return { kind: "ready", entry: { status: "photo", key: proof.key } };
+}
+
+/** A photo proof's picture on its push, so the banner shows it (push.imageUrl). */
+async function withProofImage<T extends PushPayload>(payload: T, entry: ProofEntry): Promise<T> {
+  if (entry.status !== "photo" || !entry.key) return payload;
+  const imageUrl = await proofImageUrl(entry.key, proofsBucket.value());
+  return imageUrl ? { ...payload, imageUrl } : payload;
 }
 
 /** A Health check-in against the city's effective goal (see proofs.ts). */
@@ -976,7 +984,7 @@ export const completeGoal = onCall({ enforceAppCheck: true }, async (request) =>
           group_id,
           finalData!,
           stillPending,
-          teammateCompletedNotice(cityName, completedName, proof, last),
+          await withProofImage(teammateCompletedNotice(cityName, completedName, proof, last), proofEntry),
         );
       }
     } else {

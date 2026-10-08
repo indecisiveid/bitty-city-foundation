@@ -1,4 +1,5 @@
 import { apsFor, dataFor, isValidPushToken, NotificationCategory } from "../push";
+import { downloadUrlFor } from "../proofStorage";
 
 describe("apsFor", () => {
   const base = { title: "Bitty City", body: "Ana completed today's goal." };
@@ -73,5 +74,28 @@ describe("apsFor — quiet delivery", () => {
     expect(aps.sound).toBeUndefined();
     expect(aps["interruption-level"]).toBe("passive");
     expect((apsFor({ title: "t", body: "b" }) as Record<string, unknown>).sound).toBe("default");
+  });
+});
+
+describe("a picture on the banner", () => {
+  const base = { title: "📸 Tom finished with a photo", body: "Your turn in Riverside." };
+  const imageUrl = "https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2Fg%2Fu%2Fx.jpg?alt=media&token=t";
+
+  it("lets the notification service extension rewrite the push", () => {
+    expect(apsFor({ ...base, imageUrl }).mutableContent).toBe(true);
+    expect(apsFor(base)).not.toHaveProperty("mutableContent");
+  });
+
+  it("carries the URL in data for the foreground banner", () => {
+    expect(dataFor({ ...base, imageUrl }).image_url).toBe(imageUrl);
+    expect(dataFor(base)).not.toHaveProperty("image_url");
+  });
+});
+
+describe("downloadUrlFor", () => {
+  it("encodes the object path and token the way getDownloadURL does", () => {
+    expect(downloadUrlFor("bitty-city.firebasestorage.app", "proofs/g1/u1/abc-123.jpg", "tok")).toBe(
+      "https://firebasestorage.googleapis.com/v0/b/bitty-city.firebasestorage.app/o/proofs%2Fg1%2Fu1%2Fabc-123.jpg?alt=media&token=tok",
+    );
   });
 });
