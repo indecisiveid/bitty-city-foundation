@@ -33,6 +33,8 @@ export { registerPushToken, unregisterPushToken, sendTestPush } from "./notifica
 
 export { sendKudos } from "./kudosHandlers";
 
+export { addProofComment, deleteProofComment } from "./commentHandlers";
+
 export { sendNudge } from "./nudgeHandlers";
 
 export { setMemberPause, setCityPause } from "./pauseHandlers";

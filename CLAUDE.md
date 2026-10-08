@@ -52,6 +52,11 @@ functions/src/
                      date-stamped proofs_today bucket (mirrors kudos.ts), Health
                      readings (resolveHealthProof: judged against the CITY's goal,
                      server sets target, numbers stored only when share === true)
+  comments.ts        PURE proof comments — groups/{id}/days/{date}.comments[owner]:
+                     text rules, 100/proof cap, who's notified, erasure
+  commentHandlers.ts Callables: addProofComment, deleteProofComment (author or
+                     the proof's owner); pushes the owner (social/transactional)
+                     and earlier commenters (social/normal)
   proofStorage.ts    Admin-SDK check that a claimed proof object really exists
                      (bucket from PROOFS_BUCKET param)
   notices.ts         PURE — the one policy every push passes: category budgets

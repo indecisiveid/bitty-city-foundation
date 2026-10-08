@@ -403,6 +403,35 @@ async function main() {
   const viewAnon = await getObject(key, null);
   check('rules: anonymous cannot read the photo', viewAnon.status === 403 || viewAnon.status === 401, `status=${viewAnon.status}`);
 
+  console.log('— proof comments —');
+  const cm1 = await call('addProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', text: '  Nice one!  ' }, bob);
+  check('member comments on a proof', cm1.result?.comment?.text === 'Nice one!' && cm1.result?.comment?.from === 'Bob', JSON.stringify(cm1));
+  const cm2 = await call('addProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', text: 'thanks' }, dev);
+  check('owner answers under their own proof', cm2.result?.comment?.from === 'Christian', JSON.stringify(cm2));
+  const cmSkip = await call('addProofComment', { group_id: pg.group_id, date: today, to_member: 'Bob', text: 'next time a photo?' }, dev);
+  check('a skipped proof takes comments too', !!cmSkip.result?.comment, JSON.stringify(cmSkip));
+  const cmEve = await call('addProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', text: 'hi' }, eve);
+  check('non-member comment refused', cmEve.error === 'FAILED_PRECONDITION', JSON.stringify(cmEve));
+  const cmEmpty = await call('addProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', text: '   ' }, bob);
+  check('empty comment refused', cmEmpty.error === 'INVALID_ARGUMENT', JSON.stringify(cmEmpty));
+  const cmLong = await call('addProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', text: 'x'.repeat(281) }, bob);
+  check('over-long comment refused', cmLong.error === 'INVALID_ARGUMENT', JSON.stringify(cmLong));
+  const cmNoDay = await call('addProofComment', { group_id: pg.group_id, date: '2020-01-01', to_member: 'Christian', text: 'hi' }, bob);
+  check('comment on a day with no proof refused', cmNoDay.error === 'FAILED_PRECONDITION', JSON.stringify(cmNoDay));
+  const cmFuture = await call('addProofComment', { group_id: pg.group_id, date: '2999-01-01', to_member: 'Christian', text: 'hi' }, bob);
+  check('comment on a future day refused', cmFuture.error === 'INVALID_ARGUMENT', JSON.stringify(cmFuture));
+  const cmLedger = (await readDoc(`groups/${pg.group_id}/days/${today}`, bob)).body?.fields?.comments?.mapValue?.fields ?? {};
+  const cmChristian = cmLedger.Christian?.arrayValue?.values ?? [];
+  check('comments land in the day ledger, in order', cmChristian.length === 2 && cmChristian[0]?.mapValue?.fields?.from?.stringValue === 'Bob', JSON.stringify(cmLedger).slice(0, 300));
+  const delByOther = await call('deleteProofComment', { group_id: pg.group_id, date: today, to_member: 'Bob', comment_id: cmSkip.result?.comment?.id }, bob);
+  check("proof owner can remove a comment on their proof", delByOther.result?.success === true, JSON.stringify(delByOther));
+  const delWrong = await call('deleteProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', comment_id: cm1.result?.comment?.id }, eve);
+  check('non-member cannot remove a comment', delWrong.error === 'FAILED_PRECONDITION', JSON.stringify(delWrong));
+  const delOwn = await call('deleteProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', comment_id: cm1.result?.comment?.id }, bob);
+  check('author removes their own comment', delOwn.result?.success === true, JSON.stringify(delOwn));
+  const delGone = await call('deleteProofComment', { group_id: pg.group_id, date: today, to_member: 'Christian', comment_id: cm1.result?.comment?.id }, bob);
+  check('removing it twice is not-found', delGone.error === 'NOT_FOUND', JSON.stringify(delGone));
+
   // Proof City was founded by `dev`; later checks assert dev's group_ids ends
   // up empty, so tear it down here (founder-only delete — also exercised).
   const pgDel = await call('deleteGroup', { group_id: pg.group_id }, dev);
@@ -428,12 +457,18 @@ async function main() {
   const qDone = await call('completeGoal', { group_id: qc.group_id, proof: { key: qKey } }, quinn);
   await call('completeGoal', { group_id: qc.group_id, proof: { key: dKey } }, dev);
   const qDay = qDone.result?.proofs_today?.date;
+  await call('addProofComment', { group_id: qc.group_id, date: qDay, to_member: 'Christian', text: 'from quinn' }, quinn);
+  await call('addProofComment', { group_id: qc.group_id, date: qDay, to_member: 'Christian', text: 'from christian' }, dev);
+  await call('addProofComment', { group_id: qc.group_id, date: qDay, to_member: 'Quinn', text: 'on quinn' }, dev);
   const qDel = await call('deleteAccount', {}, quinn);
   check('member deleteAccount succeeds', qDel.result?.success === true, JSON.stringify(qDel));
   check("member's proof photo erased", (await getObject(qKey, ADMIN)).status === 404);
   check("other members' photos untouched", (await getObject(dKey, ADMIN)).status === 200);
   const qLedger = (await readDoc(`groups/${qc.group_id}/days/${qDay}`, ADMIN)).body?.fields?.proofs?.mapValue?.fields ?? {};
   check("member's ledger entry erased, others kept", !('Quinn' in qLedger) && 'Christian' in qLedger, JSON.stringify(Object.keys(qLedger)));
+  const qComments = (await readDoc(`groups/${qc.group_id}/days/${qDay}`, ADMIN)).body?.fields?.comments?.mapValue?.fields ?? {};
+  const qLeft = (qComments.Christian?.arrayValue?.values ?? []).map((v) => v.mapValue?.fields?.from?.stringValue);
+  check("member's comments erased (theirs and under their proof), others kept", !('Quinn' in qComments) && JSON.stringify(qLeft) === '["Christian"]', JSON.stringify(qComments).slice(0, 300));
   const qGroup = (await readDoc(`groups/${qc.group_id}`, ADMIN)).body?.fields;
   const qToday = qGroup?.proofs_today?.mapValue?.fields?.entries?.mapValue?.fields ?? {};
   check("member removed from today's proof bucket", !('Quinn' in qToday) && 'Christian' in qToday, JSON.stringify(Object.keys(qToday)));

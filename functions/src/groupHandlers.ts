@@ -69,6 +69,7 @@ import { easyModeSuggestionMessage } from "./crewMessages";
 import { PushPayload } from "./push";
 import { proofsBucket, proofObjectSize, proofImageUrl, deleteProofObject, deleteProofPrefix } from "./proofStorage";
 import { applyBrickEntry, bricksForLanding } from "./bricks";
+import { withoutMemberComments } from "./comments";
 
 const db = () => getFirestore();
 
@@ -1550,9 +1551,15 @@ async function eraseMemberProofs(groupId: string, uid: string, name: string): Pr
   let ops = 0;
   for (const day of days.docs) {
     const proofs = (day.data().proofs ?? {}) as Record<string, unknown>;
-    if (!(name in proofs)) continue;
+    // Comments go too: the ones under their proofs and the ones they wrote.
+    const comments = withoutMemberComments(day.data().comments, name);
+    if (!(name in proofs) && !comments) continue;
     // FieldPath, not a dotted string: display names can contain dots.
-    batch.update(day.ref, new FieldPath("proofs", name), FieldValue.delete());
+    // One update per day doc, so `ops` still counts batch writes.
+    const proofField = new FieldPath("proofs", name);
+    if (name in proofs && comments) batch.update(day.ref, proofField, FieldValue.delete(), "comments", comments);
+    else if (name in proofs) batch.update(day.ref, proofField, FieldValue.delete());
+    else batch.update(day.ref, "comments", comments);
     if (++ops === 450) {
       await batch.commit();
       batch = db().batch();

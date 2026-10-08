@@ -7,6 +7,8 @@ import {
   cityGrewNotice,
   kudosNotice,
   notice,
+  proofCommentNotice,
+  threadCommentNotice,
   peerNudgeNotice,
   teammateCompletedNotice,
   testNotice,
@@ -119,6 +121,8 @@ describe("labels", () => {
     }),
     kudosNotice("A"),
     peerNudgeNotice("A", "x"),
+    proofCommentNotice("A", "nice", "2026-10-07", "B"),
+    threadCommentNotice("A", "B", "nice", "2026-10-07"),
     testNotice(),
   ];
 
@@ -167,5 +171,22 @@ describe("healthReadingTitle", () => {
     expect(healthReadingTitle("Sam", workout("walk", 21))).toBe("🏃 Sam logged a 21-min walk");
     expect(articleForNumber(18)).toBe("an");
     expect(articleForNumber(180)).toBe("a");
+  });
+});
+
+describe("proof comments", () => {
+  it("tells the owner who commented, says what, and opens that proof", () => {
+    const n = proofCommentNotice("Amit", "Great run!\nSee you tomorrow", "2026-10-07", "Tom");
+    expect(n.title).toBe("💬 Amit commented on your proof");
+    expect(n.body).toBe("Great run!");
+    expect(n.data).toEqual({ from: "Amit", proof_date: "2026-10-07", proof_member: "Tom" });
+    expect(n.meta).toMatchObject({ type: "proof_comment", category: "social", priority: "transactional" });
+  });
+
+  it("a follow-up on someone else's proof is social but not transactional", () => {
+    const n = threadCommentNotice("Amit", "Tom", "same", "2026-10-07");
+    expect(n.title).toBe("💬 Amit on Tom’s proof");
+    expect(n.data).toMatchObject({ proof_date: "2026-10-07", proof_member: "Tom" });
+    expect(n.meta).toMatchObject({ category: "social", priority: "normal" });
   });
 });

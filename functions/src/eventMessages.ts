@@ -12,6 +12,7 @@ import { PushPayload, NotificationCategory } from "./push";
 import { NoticeMeta } from "./notices";
 import { withArticle } from "./buildings";
 import { HealthReading, ProofStatus } from "./proofs";
+import { commentPreview } from "./comments";
 
 export type Notice = PushPayload & { meta: NoticeMeta };
 
@@ -140,6 +141,33 @@ export function kudosNotice(fromName: string): Notice {
     body: `${fromName} sent you kudos!`,
     data: { from: fromName },
     meta: { type: "kudos", category: "social", priority: "transactional", variant: "kudos.v1" },
+  };
+}
+
+/**
+ * Someone commented on your proof — a person acted on you, like kudos. The
+ * body is the comment itself (first line, trimmed to fit); a tap opens that
+ * day's proof scrolled to yours (`proof_date` + `proof_member`).
+ */
+export function proofCommentNotice(fromName: string, text: string, date: string, owner: string): Notice {
+  return {
+    title: `💬 ${fromName} commented on your proof`,
+    body: commentPreview(text),
+    data: { from: fromName, proof_date: date, proof_member: owner },
+    meta: { type: "proof_comment", category: "social", priority: "transactional", variant: "proof_comment.v1" },
+  };
+}
+
+/**
+ * Someone else commented under a proof you already commented on. Not about
+ * you, so `normal` — it only goes out while the day still has a spare slot.
+ */
+export function threadCommentNotice(fromName: string, owner: string, text: string, date: string): Notice {
+  return {
+    title: `💬 ${fromName} on ${owner}’s proof`,
+    body: commentPreview(text),
+    data: { from: fromName, proof_date: date, proof_member: owner },
+    meta: { type: "proof_comment_thread", category: "social", priority: "normal", variant: "proof_comment_thread.v1" },
   };
 }
 
