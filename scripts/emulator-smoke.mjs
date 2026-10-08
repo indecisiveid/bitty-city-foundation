@@ -1466,6 +1466,10 @@ async function main() {
   // so the real roll is exercised by clearing the day's roll marker and
   // waiting out the cache in the tick below.
   await new Promise((r) => setTimeout(r, 61_000));
+  // By now the smoke has pushed dev far past the per-person daily cap
+  // (notices.DAILY_TOTAL_CAP), which would rightly hold the offer back.
+  // Start the ledger fresh, as if it were a new day.
+  await adminPatch(`users/${dev.uid}`, {}, ['notices']);
   await fireSchedule();
   Q_qDoc = (await readDoc(`groups/${Q_qCity.group_id}`, ADMIN)).body?.fields ?? {};
   const Q_qf = Q_qDoc.quest?.mapValue?.fields ?? {};
